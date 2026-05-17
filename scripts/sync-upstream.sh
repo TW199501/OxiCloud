@@ -17,9 +17,9 @@ if [[ "$current" != "dev" ]]; then
 fi
 
 # Sanity: working tree must be clean
-if ! git diff-index --quiet HEAD --; then
-  echo "ERROR: working tree has uncommitted changes" >&2
-  echo "Commit or stash them first." >&2
+if [[ -n "$(git status --porcelain)" ]]; then
+  echo "ERROR: working tree has uncommitted changes or untracked files" >&2
+  echo "Commit, stash, or clean them first. Run 'git status' to see what." >&2
   exit 1
 fi
 
@@ -34,7 +34,10 @@ else
   git log --oneline dev..upstream/main
 
   echo "==> Merging upstream/main into dev..."
-  git merge upstream/main -m "merge: sync upstream/main into dev (patch fork sync)"
+  git merge upstream/main -m "merge: sync upstream/main into dev (patch fork sync)" || {
+    echo "ERROR: merge has conflicts. Resolve them, then 'git merge --continue' or 'git merge --abort' before re-running this script." >&2
+    exit 1
+  }
 
   echo "==> Pushing dev to origin..."
   git push origin dev
