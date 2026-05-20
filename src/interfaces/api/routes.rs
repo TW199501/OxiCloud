@@ -165,6 +165,7 @@ pub fn create_api_routes(app_state: &Arc<AppState>) -> Router<Arc<AppState>> {
     let share_service = app_state.share_service.clone();
     let favorites_service = app_state.favorites_service.clone();
     let recent_service = app_state.recent_service.clone();
+    let authorization = app_state.authorization.clone();
 
     // Initialize the batch operations service
     let mut batch_service_builder = BatchOperationService::default(
@@ -301,6 +302,19 @@ pub fn create_api_routes(app_state: &Arc<AppState>) -> Router<Arc<AppState>> {
         Router::new()
     };
 
+    // Create routes for ReBAC grants (/api/grants) — single state: the authz engine.
+    let grants_router = {
+        use crate::interfaces::api::handlers::grant_handler;
+        Router::new()
+            .route("/", post(grant_handler::create_grant))
+            .route("/", get(grant_handler::list_on_resource))
+            .route("/{id}", delete(grant_handler::revoke_grant))
+            .route("/role", put(grant_handler::set_role))
+            .route("/incoming", get(grant_handler::list_incoming))
+            .route("/outgoing", get(grant_handler::list_outgoing))
+            .with_state(authorization.clone())
+    };
+
     // Create a router without the i18n routes
     // Create routes for favorites if the service is available
     let favorites_router = if let Some(favorites_service) = favorites_service.clone() {
@@ -378,6 +392,7 @@ pub fn create_api_routes(app_state: &Arc<AppState>) -> Router<Arc<AppState>> {
         .nest("/batch", batch_router)
         .nest("/search", search_router)
         .nest("/shares", share_router)
+        .nest("/grants", grants_router)
         .nest("/favorites", favorites_router)
         .nest("/recent", recent_router);
 

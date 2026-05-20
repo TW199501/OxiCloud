@@ -11,6 +11,7 @@ pub mod device_auth_handler;
 pub mod favorites_handler;
 pub mod file_handler;
 pub mod folder_handler;
+pub mod grant_handler;
 pub mod i18n_handler;
 pub mod music_handler;
 pub mod photos_handler;

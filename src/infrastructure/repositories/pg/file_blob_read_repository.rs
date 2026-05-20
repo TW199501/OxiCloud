@@ -80,6 +80,20 @@ impl FileBlobReadRepository {
         }
     }
 
+    /// Returns the user_id (owner) for a given file ID.
+    /// Mirrors `FolderDbRepository::get_folder_user_id`.
+    /// Used by the AuthorizationEngine for owner short-circuit.
+    pub async fn get_file_user_id(&self, file_id: &str) -> Result<uuid::Uuid, DomainError> {
+        sqlx::query_scalar::<_, uuid::Uuid>(
+            "SELECT user_id FROM storage.files WHERE id = $1::uuid AND NOT is_trashed",
+        )
+        .bind(file_id)
+        .fetch_optional(self.pool.as_ref())
+        .await
+        .map_err(|e| DomainError::internal_error("FileBlobRead", format!("user_id lookup: {e}")))?
+        .ok_or_else(|| DomainError::not_found("File", file_id))
+    }
+
     /// Creates a stub instance for testing — never hits PG.
     #[cfg(test)]
     pub fn new_stub() -> Self {

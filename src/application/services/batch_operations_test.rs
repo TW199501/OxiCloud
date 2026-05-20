@@ -89,9 +89,18 @@ mod tests {
         let file_read_repo = Arc::new(FileBlobReadRepository::new_stub());
         let file_write_repo = Arc::new(FileBlobWriteRepository::new_stub());
 
-        let file_retrieval = Arc::new(FileRetrievalService::new(file_read_repo));
-        let file_management = Arc::new(FileManagementService::new(file_write_repo));
-        let folder_service = Arc::new(FolderService::new(folder_repo));
+        let authz =
+            Arc::new(crate::infrastructure::services::pg_acl_engine::PgAclEngine::new_stub());
+        let file_retrieval = Arc::new(FileRetrievalService::new(file_read_repo.clone()));
+        let file_management = Arc::new(FileManagementService::with_trash(
+            file_write_repo,
+            None,
+            Some(file_read_repo),
+            None,
+            None,
+            authz.clone(),
+        ));
+        let folder_service = Arc::new(FolderService::new(folder_repo, authz));
 
         let _batch_service = BatchOperationService::new(
             file_retrieval,

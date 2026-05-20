@@ -119,6 +119,12 @@ Never duplicate logic across handlers or services. If the same behaviour is need
 - Reusable infrastructure behaviour → method on the relevant service struct
 - Shared port behaviour → default method on the trait
 
+### Authorization (AuthZ)
+
+**AuthZ is enforced exclusively in the application service layer, never in handlers.** All permission checks go through `AuthorizationEngine` (port: `application/ports/authorization_ports.rs`) via service methods named with the `_with_perms` suffix. HTTP handlers (REST, WebDAV, NextCloud, CalDAV, CardDAV) authenticate the caller and pass `caller_id` into the service — they MUST NOT perform their own ownership/permission checks. The authentication middleware extracts the caller; the service decides if the action is allowed.
+
+This rule prevents drift between layers and ensures every code path goes through the same policy. New service methods that touch a user-scoped resource must take `caller_id: Uuid` and call `authz.require(...)` before any read or mutation.
+
 # Frontend part
 
 ## Code conventions

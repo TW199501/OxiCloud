@@ -350,9 +350,13 @@ impl AppServiceFactory {
         repos: &RepositoryServices,
         trash_service: Option<Arc<TrashService>>,
         db_pool: &Arc<PgPool>,
+        authz: &Arc<crate::infrastructure::services::pg_acl_engine::PgAclEngine>,
     ) -> ApplicationServices {
         // Main services
-        let folder_service = Arc::new(FolderService::new(repos.folder_repository.clone()));
+        let folder_service = Arc::new(FolderService::new(
+            repos.folder_repository.clone(),
+            authz.clone(),
+        ));
 
         // Refactored services with all infrastructure ports
         // In blob model, dedup is handled by the repository — no separate write-behind needed
@@ -374,6 +378,7 @@ impl AppServiceFactory {
             repos.file_read_repository.clone(),
             core.file_content_cache.clone(),
             core.image_transcode_service.clone(),
+            authz.clone(),
         ));
 
         // FileManagementService — ref_count handled by PG trigger, no dedup port needed
@@ -384,6 +389,7 @@ impl AppServiceFactory {
                 Some(repos.file_read_repository.clone()),
                 Some(repos.folder_repository.clone()),
                 Some(core.file_content_cache.clone()),
+                authz.clone(),
             )
             .with_file_deleted_hook(core.thumbnail_service.clone()),
         );
@@ -391,6 +397,7 @@ impl AppServiceFactory {
         let file_use_case_factory = Arc::new(AppFileUseCaseFactory::new(
             repos.file_read_repository.clone(),
             repos.file_write_repository.clone(),
+            authz.clone(),
         ));
 
         let i18n_service = Arc::new(I18nApplicationService::new(repos.i18n_repository.clone()));
@@ -605,9 +612,22 @@ impl AppServiceFactory {
         // 3. Trash service (needed before application services)
         let trash_service = self.create_trash_service(&repos, &core).await;
 
-        // 4. Application services (with trash already wired)
-        let mut apps =
-            self.create_application_services(&core, &repos, trash_service.clone(), &pool);
+        // 3b. Authorization engine — must exist before application services
+        // because services hold an Arc<PgAclEngine> for ReBAC checks.
+        let authorization = build_authorization_engine(
+            pool.clone(),
+            repos.folder_repository.clone(),
+            repos.file_read_repository.clone(),
+        );
+
+        // 4. Application services (with trash + authz already wired)
+        let mut apps = self.create_application_services(
+            &core,
+            &repos,
+            trash_service.clone(),
+            &pool,
+            &authorization,
+        );
 
         // 5. Share service
         let share_service = self.create_share_service(&repos, &pool);
@@ -777,6 +797,7 @@ impl AppServiceFactory {
             path_resolver: None,
             webdav_lock_store:
                 crate::infrastructure::services::webdav_lock_service::create_webdav_lock_store(),
+            authorization,
         };
 
         // 9b. Wire admin settings service when auth is available
@@ -1092,6 +1113,38 @@ pub struct AppState {
         Option<Arc<crate::infrastructure::services::path_resolver_service::PathResolverService>>,
     pub webdav_lock_store:
         Arc<crate::infrastructure::services::webdav_lock_service::WebDavLockStore>,
+    /// ReBAC authorization engine — all service-layer permission checks go
+    /// through this. Concrete type today is `PgAclEngine`; the
+    /// `AuthorizationEngine` trait describes the contract. When alternate
+    /// implementations land (OpenFGA, cached decorator), swap this field for
+    /// an enum dispatcher or `Arc<dyn AuthorizationEngine>` (with
+    /// `async_trait` boxing).
+    pub authorization: Arc<crate::infrastructure::services::pg_acl_engine::PgAclEngine>,
 }
 
 // All AppState construction is done via struct literal in build_app_state().
+
+/// Builds the authorization engine. Today this only constructs `PgAclEngine`;
+/// the `OXICLOUD_AUTHZ_ENGINE` env var is reserved for future alternate
+/// implementations (e.g. `openfga`).
+fn build_authorization_engine(
+    pool: Arc<PgPool>,
+    folder_repo: Arc<
+        crate::infrastructure::repositories::pg::folder_db_repository::FolderDbRepository,
+    >,
+    file_repo: Arc<
+        crate::infrastructure::repositories::pg::file_blob_read_repository::FileBlobReadRepository,
+    >,
+) -> Arc<crate::infrastructure::services::pg_acl_engine::PgAclEngine> {
+    use crate::infrastructure::services::pg_acl_engine::PgAclEngine;
+
+    if let Ok(other) = std::env::var("OXICLOUD_AUTHZ_ENGINE")
+        && other != "postgres"
+        && !other.is_empty()
+    {
+        panic!(
+            "OXICLOUD_AUTHZ_ENGINE={other:?} is not yet supported. Only 'postgres' is implemented; leave the variable unset to use the default."
+        );
+    }
+    Arc::new(PgAclEngine::new(pool, folder_repo, file_repo))
+}

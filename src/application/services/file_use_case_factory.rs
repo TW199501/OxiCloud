@@ -6,11 +6,13 @@ use crate::application::services::file_retrieval_service::FileRetrievalService;
 use crate::application::services::file_upload_service::FileUploadService;
 use crate::infrastructure::repositories::pg::file_blob_read_repository::FileBlobReadRepository;
 use crate::infrastructure::repositories::pg::file_blob_write_repository::FileBlobWriteRepository;
+use crate::infrastructure::services::pg_acl_engine::PgAclEngine;
 
 /// Factory for creating file use case implementations
 pub struct AppFileUseCaseFactory {
     file_read_repository: Arc<FileBlobReadRepository>,
     file_write_repository: Arc<FileBlobWriteRepository>,
+    authz: Arc<PgAclEngine>,
 }
 
 impl AppFileUseCaseFactory {
@@ -18,10 +20,12 @@ impl AppFileUseCaseFactory {
     pub fn new(
         file_read_repository: Arc<FileBlobReadRepository>,
         file_write_repository: Arc<FileBlobWriteRepository>,
+        authz: Arc<PgAclEngine>,
     ) -> Self {
         Self {
             file_read_repository,
             file_write_repository,
+            authz,
         }
     }
 }
@@ -36,8 +40,13 @@ impl FileUseCaseFactory for AppFileUseCaseFactory {
     }
 
     fn create_file_management_use_case(&self) -> Arc<FileManagementService> {
-        Arc::new(FileManagementService::new(
+        Arc::new(FileManagementService::with_trash(
             self.file_write_repository.clone(),
+            None,
+            Some(self.file_read_repository.clone()),
+            None,
+            None,
+            self.authz.clone(),
         ))
     }
 }

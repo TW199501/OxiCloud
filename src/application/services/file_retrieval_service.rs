@@ -4,14 +4,17 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use crate::application::dtos::file_dto::FileDto;
+use crate::application::ports::authorization_ports::AuthorizationEngine;
 use crate::application::ports::file_ports::{FileRetrievalUseCase, OptimizedFileContent};
 use crate::application::ports::storage_ports::FileReadPort;
 use crate::common::errors::DomainError;
+use crate::domain::services::authorization::{Permission, Resource, Subject};
 use crate::infrastructure::repositories::pg::file_blob_read_repository::FileBlobReadRepository;
 use crate::infrastructure::services::file_content_cache::FileContentCache;
 use crate::infrastructure::services::image_transcode_service::{
     ImageTranscodeService, OutputFormat,
 };
+use crate::infrastructure::services::pg_acl_engine::PgAclEngine;
 use tracing::{debug, info};
 use uuid::Uuid;
 
@@ -29,29 +32,53 @@ pub struct FileRetrievalService {
     file_read: Arc<FileBlobReadRepository>,
     content_cache: Option<Arc<FileContentCache>>,
     transcode: Option<Arc<ImageTranscodeService>>,
+    authz: Option<Arc<PgAclEngine>>,
 }
 
 impl FileRetrievalService {
-    /// Backward-compatible constructor (simple pass-through).
+    /// Backward-compatible constructor (simple pass-through). Without the
+    /// authorization engine, the `*_owned`/`*_with_perms` methods fail closed.
+    /// Use `new_with_cache` in production.
     pub fn new(file_repository: Arc<FileBlobReadRepository>) -> Self {
         Self {
             file_read: file_repository,
             content_cache: None,
             transcode: None,
+            authz: None,
         }
     }
 
-    /// Constructor for blob-storage model: read + content cache + transcode.
+    /// Constructor for blob-storage model: read + content cache + transcode +
+    /// ReBAC authorization.
     pub fn new_with_cache(
         file_read: Arc<FileBlobReadRepository>,
         content_cache: Arc<FileContentCache>,
         transcode: Arc<ImageTranscodeService>,
+        authz: Arc<PgAclEngine>,
     ) -> Self {
         Self {
             file_read,
             content_cache: Some(content_cache),
             transcode: Some(transcode),
+            authz: Some(authz),
         }
+    }
+
+    /// Helper: require the caller has `perm` on the given file id.
+    /// Fail-closed if no engine was injected (stub/test path).
+    async fn require_file(
+        &self,
+        file_id: &str,
+        perm: Permission,
+        caller_id: Uuid,
+    ) -> Result<(), DomainError> {
+        let authz = self.authz.as_ref().ok_or_else(|| {
+            DomainError::internal_error("FileRetrieval", "Authorization engine unavailable")
+        })?;
+        let uuid = Uuid::parse_str(file_id).map_err(|_| DomainError::not_found("File", file_id))?;
+        authz
+            .require(Subject::User(caller_id), perm, Resource::File(uuid))
+            .await
     }
 
     // ── private helpers ──────────────────────────────────────────
@@ -203,12 +230,17 @@ impl FileRetrievalUseCase for FileRetrievalService {
     }
 
     async fn get_file_owned(&self, id: &str, caller_id: Uuid) -> Result<FileDto, DomainError> {
-        let file = self.file_read.get_file_for_owner(id, caller_id).await?;
+        self.require_file(id, Permission::Read, caller_id).await?;
+        let file = self.file_read.get_file(id).await?;
         Ok(FileDto::from(file))
     }
 
     async fn get_file_by_path(&self, path: &str) -> Result<FileDto, DomainError> {
         // Direct SQL lookup — O(folder_depth) queries instead of O(total_files)
+        // NOTE: This method does NOT perform any authorization check. Callers
+        // that surface its result to a user-driven request MUST resolve the
+        // file via get_file_owned afterwards, or call authz.require directly.
+        // (Tracked in the audit punch-list under "path-based lookups".)
         if let Some(file) = self.file_read.find_file_by_path(path).await? {
             return Ok(FileDto::from(file));
         }
@@ -248,7 +280,7 @@ impl FileRetrievalUseCase for FileRetrievalService {
         id: &str,
         caller_id: Uuid,
     ) -> Result<Box<dyn Stream<Item = Result<Bytes, std::io::Error>> + Send>, DomainError> {
-        self.file_read.verify_file_owner(id, caller_id).await?;
+        self.require_file(id, Permission::Read, caller_id).await?;
         self.file_read.get_file_stream(id).await
     }
 
@@ -272,7 +304,8 @@ impl FileRetrievalUseCase for FileRetrievalService {
         accept_webp: bool,
         prefer_original: bool,
     ) -> Result<(FileDto, OptimizedFileContent), DomainError> {
-        let file = self.file_read.get_file_for_owner(id, caller_id).await?;
+        self.require_file(id, Permission::Read, caller_id).await?;
+        let file = self.file_read.get_file(id).await?;
         let dto = FileDto::from(file);
         self.optimized_inner(id, dto, accept_webp, prefer_original)
             .await
@@ -307,8 +340,7 @@ impl FileRetrievalUseCase for FileRetrievalService {
         start: u64,
         end: Option<u64>,
     ) -> Result<Box<dyn Stream<Item = Result<Bytes, std::io::Error>> + Send>, DomainError> {
-        // Verify ownership first, then delegate to the unscoped stream
-        self.file_read.verify_file_owner(id, caller_id).await?;
+        self.require_file(id, Permission::Read, caller_id).await?;
         self.file_read.get_file_range_stream(id, start, end).await
     }
 
