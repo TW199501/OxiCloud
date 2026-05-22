@@ -10,7 +10,8 @@
         "favorites": "Favorieten",
         "photos": "Foto's",
         "music": "Muziek",
-        "trash": "Prullenbak"
+        "trash": "Prullenbak",
+        "sharedwithme": "Gedeeld met mij"
     },
     "photos": {
         "empty_state": "Nog geen foto's",
@@ -682,5 +683,18 @@
         "files": "bestanden",
         "complete": "{{count}} / {{total}} geüpload"
     },
-    "storage_quota_exceeded": "Opslagquotum overschreden"
+    "storage_quota_exceeded": "Opslagquotum overschreden",
+    "sharedwithme": {
+        "pageTitle": "Gedeeld met mij",
+        "pageDescription": "Bestanden en mappen die andere gebruikers met u hebben gedeeld",
+        "emptyStateTitle": "Er is nog niets met u gedeeld",
+        "emptyStateDesc": "Items die andere gebruikers met u delen, verschijnen hier",
+        "loadMore": "Meer laden",
+        "sharedBy": "Gedeeld door",
+        "colName": "Naam",
+        "colType": "Type",
+        "colSharedBy": "Gedeeld door",
+        "colDate": "Datum gedeeld",
+        "colPermissions": "Machtigingen"
+    }
 }

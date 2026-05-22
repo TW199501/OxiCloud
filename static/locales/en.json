@@ -5,7 +5,8 @@
     },
     "nav": {
         "files": "Files",
-        "shared": "Shared",
+        "shared": "My shares",
+        "sharedwithme": "Shared with me",
         "recent": "Recent",
         "favorites": "Favorites",
         "photos": "Photos",
@@ -682,5 +683,18 @@
         "files": "files",
         "complete": "{{count}} / {{total}} uploaded"
     },
-    "storage_quota_exceeded": "Storage quota exceeded"
+    "storage_quota_exceeded": "Storage quota exceeded",
+    "sharedwithme": {
+        "pageTitle": "Shared with me",
+        "pageDescription": "Files and folders others have shared with you",
+        "emptyStateTitle": "Nothing shared with you yet",
+        "emptyStateDesc": "Items shared with you by other users will appear here",
+        "loadMore": "Load more",
+        "sharedBy": "Shared by",
+        "colName": "Name",
+        "colType": "Type",
+        "colSharedBy": "Shared by",
+        "colDate": "Date shared",
+        "colPermissions": "Permissions"
+    }
 }

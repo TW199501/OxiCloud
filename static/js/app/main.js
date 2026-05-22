@@ -16,10 +16,12 @@ import { multiSelect } from '../features/files/multiSelect.js';
 import { favorites } from '../features/library/favorites.js';
 import { recent } from '../features/library/recent.js';
 import { fileSharing } from '../features/sharing/fileSharing.js';
+import { grants } from '../model/grants.js';
 import { sharedView } from '../views/shared/sharedView.js';
 import { checkAuthentication } from './authSession.js';
 import { loadFiles } from './filesView.js';
 import {
+    activateFilesUI,
     SECTIONS_MAPPER,
     switchToFavoritesSection,
     switchToFilesSection,
@@ -27,6 +29,7 @@ import {
     switchToPhotosSection,
     switchToRecentFilesSection,
     switchToSharedSection,
+    switchToSharedWithMeSection,
     switchToTrashSection
 } from './navigation.js';
 import { performSearch } from './searchView.js';
@@ -140,12 +143,16 @@ const ACTIONS_BAR_TEMPLATES = {
         </div>
         ${_multiSelectButons}
         ${_toggleButtons}
+    `,
+    sharedwithme: `
+        <div class="action-buttons" id="default-buttons"></div>
+        ${_toggleButtons}
     `
 };
 
 /**
  *
- * @param {'files' | 'trash' | 'favorites' | 'recent' | 'hidden'} mode
+ * @param {'files' | 'trash' | 'favorites' | 'recent' | 'sharedwithme' | 'hidden'} mode
  * @param {boolean} [force=false]
  * @returns
  */
@@ -398,6 +405,9 @@ function initApp() {
                 app.viewFile = hashContext.file;
             }
 
+            // get grants (xxx: async methods)
+            await grants.fetchIncomingGrants();
+            await grants.fetchOutgoingGrants();
             loadFiles();
         }
     });
@@ -652,6 +662,10 @@ function setupEventListeners() {
                     switchToSharedSection();
                     break;
 
+                case 'nav.sharedwithme':
+                    switchToSharedWithMeSection();
+                    break;
+
                 case 'nav.favorites':
                     // Switch to favorites view
                     switchToFavoritesSection();
@@ -723,6 +737,12 @@ function setupEventListeners() {
  * @param {string} name
  */
 export function selectFolder(id, name) {
+    // When entering from a non-files section (e.g. "Shared with me"),
+    // activate the Files UI (nav active state, breadcrumb, action bar,
+    // container) without resetting the current path.
+    if (app.currentSection !== 'files') {
+        activateFilesUI();
+    }
     app.breadcrumbPath.push({ id, name });
     app.currentPath = id;
     ui.updateBreadcrumb();

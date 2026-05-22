@@ -5,12 +5,13 @@
     },
     "nav": {
         "files": "الملفات",
-        "shared": "المشترك",
+        "shared": "مشاركاتي",
         "recent": "الأخيرة",
         "favorites": "المفضلة",
         "photos": "الصور",
         "music": "الموسيقى",
-        "trash": "سلة المهملات"
+        "trash": "سلة المهملات",
+        "sharedwithme": "مشتركة معي"
     },
     "photos": {
         "empty_state": "لا توجد صور بعد",
@@ -682,5 +683,18 @@
         "files": "ملفات",
         "complete": "{{count}} / {{total}} تم الرفع"
     },
-    "storage_quota_exceeded": "تجاوز حصة التخزين"
+    "storage_quota_exceeded": "تجاوز حصة التخزين",
+    "sharedwithme": {
+        "pageTitle": "مشترك معي",
+        "pageDescription": "الملفات والمجلدات التي شاركها معك مستخدمون آخرون",
+        "emptyStateTitle": "لم يُشارك معك أي شيء بعد",
+        "emptyStateDesc": "ستظهر هنا العناصر التي يشاركها معك مستخدمون آخرون",
+        "loadMore": "تحميل المزيد",
+        "sharedBy": "مشترك من قِبل",
+        "colName": "الاسم",
+        "colType": "النوع",
+        "colSharedBy": "مشترك من قِبل",
+        "colDate": "تاريخ المشاركة",
+        "colPermissions": "الصلاحيات"
+    }
 }

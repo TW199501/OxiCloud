@@ -10,7 +10,8 @@
         "favorites": "Favoritos",
         "photos": "Fotos",
         "music": "Música",
-        "trash": "Papelera"
+        "trash": "Papelera",
+        "sharedwithme": "Compartidos conmigo"
     },
     "photos": {
         "empty_state": "Aún no hay fotos",
@@ -682,5 +683,18 @@
         "files": "archivos",
         "complete": "{{count}} / {{total}} subidos"
     },
-    "storage_quota_exceeded": "Cuota de almacenamiento superada"
+    "storage_quota_exceeded": "Cuota de almacenamiento superada",
+    "sharedwithme": {
+        "pageTitle": "Compartido conmigo",
+        "pageDescription": "Archivos y carpetas que otros usuarios han compartido contigo",
+        "emptyStateTitle": "Aún no hay nada compartido contigo",
+        "emptyStateDesc": "Los elementos que otros usuarios compartan contigo aparecerán aquí",
+        "loadMore": "Cargar más",
+        "sharedBy": "Compartido por",
+        "colName": "Nombre",
+        "colType": "Tipo",
+        "colSharedBy": "Compartido por",
+        "colDate": "Fecha de compartición",
+        "colPermissions": "Permisos"
+    }
 }

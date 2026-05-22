@@ -10,7 +10,8 @@
         "favorites": "收藏",
         "photos": "照片",
         "music": "音樂",
-        "trash": "回收站"
+        "trash": "回收站",
+        "sharedwithme": "與我共享"
     },
     "photos": {
         "empty_state": "還沒有照片",
@@ -682,5 +683,18 @@
         "files": "個檔案",
         "complete": "已上傳 {{count}} / {{total}}"
     },
-    "storage_quota_exceeded": "儲存配額已超限"
+    "storage_quota_exceeded": "儲存配額已超限",
+    "sharedwithme": {
+        "pageTitle": "與我共享",
+        "pageDescription": "其他使用者與您共享的檔案和資料夾",
+        "emptyStateTitle": "目前沒有內容與您共享",
+        "emptyStateDesc": "其他使用者與您共享的項目將顯示在這裡",
+        "loadMore": "載入更多",
+        "sharedBy": "共享者",
+        "colName": "名稱",
+        "colType": "類型",
+        "colSharedBy": "共享者",
+        "colDate": "共享日期",
+        "colPermissions": "權限"
+    }
 }

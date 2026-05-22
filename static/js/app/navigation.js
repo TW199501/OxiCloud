@@ -10,6 +10,7 @@ import { musicView } from '../features/library/music.js';
 import { photosView } from '../features/library/photos.js';
 import { recent } from '../features/library/recent.js';
 import { sharedView } from '../views/shared/sharedView.js';
+import { sharedWithMeView } from '../views/sharedWithMe/sharedWithMeView.js';
 import { loadFiles } from './filesView.js';
 import { setActionsBarMode } from './main.js';
 import { app, appElements } from './state.js';
@@ -122,6 +123,7 @@ function getSectionFromNavItem(navItem) {
 export const SECTIONS_MAPPER = {
     files: switchToFilesSection,
     shared: switchToSharedSection,
+    sharedwithme: switchToSharedWithMeSection,
     recent: switchToRecentFilesSection,
     favorites: switchToFavoritesSection,
     trash: switchToTrashSection,
@@ -155,6 +157,11 @@ function setCurrentSection(section) {
     // Hide sharedView when switching to any other section
     if (section !== 'shared' && sharedView) {
         sharedView.hide();
+    }
+
+    // Hide "Load more" button when leaving the sharedwithme section
+    if (section !== 'sharedwithme' && sharedWithMeView) {
+        sharedWithMeView.hide();
     }
 
     // Hide photosView when switching to any other section
@@ -192,6 +199,26 @@ function switchToSharedSection() {
     });
 
     if (multiSelect) multiSelect.clear();
+}
+
+function switchToSharedWithMeSection() {
+    if (!setCurrentSection('sharedwithme')) return;
+
+    // Hide breadcrumb (only shown in Files view)
+    const breadcrumb = document.querySelector('.breadcrumb');
+    breadcrumb?.classList.add('hidden');
+
+    // Show actions-bar with view toggle (no upload / new-folder in this view)
+    setActionsBarMode('sharedwithme');
+
+    // Show the standard files container and respect grid/list preference
+    toggleFileContainer(true);
+    syncViewContainers();
+
+    if (multiSelect) multiSelect.clear();
+
+    // Load and render items into the files container
+    sharedWithMeView.init();
 }
 
 function switchToFilesSection() {
@@ -368,13 +395,34 @@ function switchToMusicSection() {
     if (multiSelect) multiSelect.clear();
 }
 
+/**
+ * Activate the Files section UI (nav state, breadcrumb, actions bar,
+ * files container, grid/list sync) WITHOUT resetting `app.currentPath`
+ * or `app.breadcrumbPath`.
+ *
+ * Used by `selectFolder` when the user clicks a folder from a
+ * non-files section (e.g. "Shared with me") so the Files view is
+ * fully set up before the folder content loads.
+ */
+function activateFilesUI() {
+    setCurrentSection('files');
+    setActionsBarMode('files', true);
+    const breadcrumb = document.querySelector('.breadcrumb');
+    breadcrumb?.classList.remove('hidden');
+    toggleFileContainer(true);
+    syncViewContainers();
+    if (multiSelect) multiSelect.clear();
+}
+
 export {
+    activateFilesUI,
     switchToFavoritesSection,
     switchToFilesSection,
     switchToMusicSection,
     switchToPhotosSection,
     switchToRecentFilesSection,
     switchToSharedSection,
+    switchToSharedWithMeSection,
     switchToTrashSection,
     syncViewContainers
 };

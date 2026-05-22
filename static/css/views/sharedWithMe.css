@@ -1,0 +1,13 @@
+/**
+ * Shared-with-me view styles.
+ *
+ * The grid/list rendering reuses the standard `.files-container` / `#files-list`
+ * styles from filesView.css. Only view-specific additions are defined here.
+ */
+
+/* ── "Load more" button row ───────────────────────────────────────────────── */
+.swm-load-more-wrapper {
+    display: flex;
+    justify-content: center;
+    padding: 16px 0 24px;
+}

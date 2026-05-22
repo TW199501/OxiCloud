@@ -5,12 +5,13 @@
     },
     "nav": {
         "files": "Fichiers",
-        "shared": "Partagés",
+        "shared": "Partages",
         "recent": "Récents",
         "favorites": "Favoris",
         "photos": "Photos",
         "music": "Musique",
-        "trash": "Corbeille"
+        "trash": "Corbeille",
+        "sharedwithme": "Partages avec moi"
     },
     "photos": {
         "empty_state": "Pas encore de photos",
@@ -682,5 +683,18 @@
         "files": "fichiers",
         "complete": "{{count}} / {{total}} téléchargés"
     },
-    "storage_quota_exceeded": "Quota de stockage dépassé"
+    "storage_quota_exceeded": "Quota de stockage dépassé",
+    "sharedwithme": {
+        "pageTitle": "Partagé avec moi",
+        "pageDescription": "Fichiers et dossiers que d'autres utilisateurs ont partagés avec vous",
+        "emptyStateTitle": "Rien n'a encore été partagé avec vous",
+        "emptyStateDesc": "Les éléments partagés avec vous par d'autres utilisateurs apparaîtront ici",
+        "loadMore": "Charger plus",
+        "sharedBy": "Partagé par",
+        "colName": "Nom",
+        "colType": "Type",
+        "colSharedBy": "Partagé par",
+        "colDate": "Date de partage",
+        "colPermissions": "Permissions"
+    }
 }

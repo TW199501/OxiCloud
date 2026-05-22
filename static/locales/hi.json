@@ -10,7 +10,8 @@
         "favorites": "पसंदीदा",
         "photos": "फ़ोटो",
         "music": "संगीत",
-        "trash": "रद्दी"
+        "trash": "रद्दी",
+        "sharedwithme": "मेरे साथ साझा किए गए"
     },
     "photos": {
         "empty_state": "अभी कोई फ़ोटो नहीं",
@@ -682,5 +683,18 @@
         "files": "फ़ाइलें",
         "complete": "{{count}} / {{total}} अपलोड हुए"
     },
-    "storage_quota_exceeded": "स्टोरेज कोटा पार हो गया"
+    "storage_quota_exceeded": "स्टोरेज कोटा पार हो गया",
+    "sharedwithme": {
+        "pageTitle": "मेरे साथ साझा किया",
+        "pageDescription": "फ़ाइलें और फ़ोल्डर जो अन्य उपयोगकर्ताओं ने आपके साथ साझा किए हैं",
+        "emptyStateTitle": "अभी तक आपके साथ कुछ भी साझा नहीं किया गया",
+        "emptyStateDesc": "अन्य उपयोगकर्ताओं द्वारा आपके साथ साझा किए गए आइटम यहाँ दिखाई देंगे",
+        "loadMore": "और लोड करें",
+        "sharedBy": "द्वारा साझा किया",
+        "colName": "नाम",
+        "colType": "प्रकार",
+        "colSharedBy": "द्वारा साझा किया",
+        "colDate": "साझाकरण तिथि",
+        "colPermissions": "अनुमतियाँ"
+    }
 }

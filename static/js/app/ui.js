@@ -17,10 +17,10 @@ import { favorites } from '../features/library/favorites.js';
 import { recent } from '../features/library/recent.js';
 import { fileSharing } from '../features/sharing/fileSharing.js';
 import { thumbnail } from '../features/thumbnail.js';
-import { sharedView } from '../views/shared/sharedView.js';
+import { grants } from '../model/grants.js';
 import { loadFiles } from './filesView.js';
 import { updateHistory } from './main.js';
-import { switchToFilesSection, syncViewContainers } from './navigation.js';
+import { activateFilesUI, switchToFilesSection, syncViewContainers } from './navigation.js';
 import { app } from './state.js';
 import { uiFileTypes } from './uiFileTypes.js';
 import { uiNotifications } from './uiNotifications.js';
@@ -54,7 +54,7 @@ const ui = {
                     <i class="fas fa-star"></i> <span data-i18n="actions.favorite">Add to favorites</span>
                 </div>
                 <div class="context-menu-item" id="share-folder-option">
-                    <i class="fas fa-share-alt"></i> <span data-i18n="actions.share">Share</span>
+                    <i class="fas fa-oxiexport"></i> <span data-i18n="actions.share">Share</span>
                 </div>
                 <div class="context-menu-separator"></div>
                 <div class="context-menu-item" id="rename-folder-option">
@@ -98,7 +98,7 @@ const ui = {
                     <i class="fas fa-star"></i> <span data-i18n="actions.favorite">Add to favorites</span>
                 </div>
                 <div class="context-menu-item" id="share-file-option">
-                    <i class="fas fa-share-alt"></i> <span data-i18n="actions.share">Share</span>
+                    <i class="fas fa-oxiexport"></i> <span data-i18n="actions.share">Share</span>
                 </div>
                 <div class="context-menu-item hidden" id="add-to-playlist-option">
                     <i class="fas fa-compact-disc"></i> <span data-i18n="music.add_to_playlist">Add to Playlist</span>
@@ -154,7 +154,7 @@ const ui = {
             shareDialog.innerHTML = `
                 <div class="share-dialog-content">
                     <div class="share-dialog-header">
-                        <i class="fas fa-share-alt dialog-header-icon"></i>
+                        <i class="fas fa-oxiexport dialog-header-icon"></i>
                         <span data-i18n="dialogs.share_file">Share file</span>
                     </div>
                     <div class="shared-item-info">
@@ -937,6 +937,11 @@ const ui = {
                 loadFiles();
                 return;
             }
+            if (app.currentSection === 'sharedwithme') {
+                // Activate Files UI (nav, breadcrumb, actions bar) without
+                // resetting the path — the shared folder becomes the entry point.
+                activateFilesUI();
+            }
             app.breadcrumbPath.push({ id: folderId, name: folderName });
             app.currentPath = folderId;
             this.updateBreadcrumb();
@@ -1334,7 +1339,7 @@ const ui = {
         if (folder.path) el.dataset.path = folder.path;
 
         const isFav = favorites?.isFavorite(folder.id, 'folder');
-        const isShared = sharedView.isShared(folder.id, 'folder');
+        const isShared = grants.getOutgoingGrantsFor('folder', folder.id).length > 0; //sharedView.isShared(folder.id, 'folder');
         const formattedDate = formatDateTime(folder.modified_at);
 
         el.innerHTML = `
@@ -1345,7 +1350,7 @@ const ui = {
                 </div>
                 <span>${escapeHtml(folder.name)}</span>
                 <div class="file-badge file-badge-favorite ${isFav ? '' : 'hidden'}"><i class="fas fa-star favorite-star-inline"></i></div>
-                <div class="file-badge file-badge-shared ${isShared ? '' : 'hidden'}"><i class="fas fa-share-alt"></i></div>
+                <div class="file-badge file-badge-shared ${isShared ? '' : 'hidden'}"><i class="fas fa-oxiexport"></i></div>
             </div>
             <div class="type-cell">${i18n.t('files.file_types.folder')}</div>
             <div class="size-cell">--</div>
@@ -1377,7 +1382,8 @@ const ui = {
         const fileSize = file.size_formatted || formatFileSize(file.size);
         const formattedDate = formatDateTime(file.modified_at);
         const isFav = favorites?.isFavorite(file.id, 'file');
-        const isShared = sharedView.isShared(file.id, 'file');
+        const isShared = grants.getOutgoingGrantsFor('file', file.id).length > 0;
+        //const isShared = sharedView.isShared(file.id, 'file');
         const canThumbnail = thumbnail.canHandle(file);
 
         const el = document.createElement('div');
@@ -1398,7 +1404,7 @@ const ui = {
                 </div>
                 <span>${escapeHtml(file.name)}</span>
                 <div class="file-badge file-badge-favorite ${isFav ? '' : 'hidden'}"><i class="fas fa-star favorite-star-inline"></i></div>
-                <div class="file-badge file-badge-shared ${isShared ? '' : 'hidden'}"><i class="fas fa-share-alt"></i></div>
+                <div class="file-badge file-badge-shared ${isShared ? '' : 'hidden'}"><i class="fas fa-oxiexport"></i></div>
             </div>
             <div class="type-cell">${typeLabel}</div>
             <div class="size-cell">${fileSize}</div>

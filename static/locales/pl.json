@@ -10,7 +10,8 @@
         "favorites": "Ulubione",
         "photos": "Zdjęcia",
         "music": "Muzyka",
-        "trash": "Kosz"
+        "trash": "Kosz",
+        "sharedwithme": "Udostępnione dla mnie"
     },
     "photos": {
         "empty_state": "Brak zdjęć",
@@ -682,5 +683,18 @@
         "files": "plików",
         "complete": "{{count}} / {{total}} przesłano"
     },
-    "storage_quota_exceeded": "Przekroczono limit pamięci masowej"
+    "storage_quota_exceeded": "Przekroczono limit pamięci masowej",
+    "sharedwithme": {
+        "pageTitle": "Udostępnione dla mnie",
+        "pageDescription": "Pliki i foldery, które inni użytkownicy udostępnili Ci",
+        "emptyStateTitle": "Nic nie zostało Ci jeszcze udostępnione",
+        "emptyStateDesc": "Elementy udostępnione Ci przez innych użytkowników pojawią się tutaj",
+        "loadMore": "Załaduj więcej",
+        "sharedBy": "Udostępnione przez",
+        "colName": "Nazwa",
+        "colType": "Typ",
+        "colSharedBy": "Udostępnione przez",
+        "colDate": "Data udostępnienia",
+        "colPermissions": "Uprawnienia"
+    }
 }

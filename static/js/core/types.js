@@ -253,3 +253,63 @@
  * @property {number|null} width
  * @property {number|null} height
  */
+
+// ------------------- grants
+
+/**
+ * @typedef {'read'|'create'|'share'|'comment'|'delete'|'update'} PermissionTypeEnum
+ */
+
+/**
+ * @typedef {'folder'|'file'} ResourceTypeEnum
+ */
+
+/**
+ * @typedef {Object} Resource
+ * @property {ResourceTypeEnum} type
+ * @property {String} id
+ */
+
+/**
+ * @typedef {'user'|'group'|'external'} SubjectTypeEnum
+ */
+
+/**
+ * @typedef {Object} Subject
+ * @property {SubjectTypeEnum} type
+ * @property {String} id
+ */
+
+/**
+ * @typedef {Object} Grant
+ * @property {string} id
+ * @property {number} granted_at
+ * @property {string} granted_by
+ * @property {Subject} subject
+ * @property {PermissionTypeEnum} permission
+ * @property {Resource} resource
+ */
+
+/**
+ * Roles: `viewer`, `commenter`, `editor`, `manager`, `admin`
+ */
+
+/**
+ * One item returned by `GET /api/grants/incoming/resources`.
+ * Exactly one of `file` / `folder` is populated (indicated by `resource_type`).
+ * @typedef {Object} SharedWithMeItem
+ * @property {ResourceTypeEnum}        resource_type
+ * @property {PermissionTypeEnum[]}    permissions   - All permissions the caller holds on this resource.
+ * @property {string}                  granted_at    - ISO-8601 timestamp of the earliest grant.
+ * @property {string}                  granted_by    - UUID of the user who created the grant.
+ * @property {FileItem|undefined}      [file]        - Populated when resource_type === 'file'.
+ * @property {FolderItem|undefined}    [folder]      - Populated when resource_type === 'folder'.
+ */
+
+/**
+ * Response for `GET /api/grants/incoming/resources`.
+ * @typedef {Object} SharedWithMeResponse
+ * @property {SharedWithMeItem[]}  items
+ * @property {string|undefined}    [next_cursor]  - Absent when the last page is reached.
+ */
+

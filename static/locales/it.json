@@ -5,12 +5,13 @@
     },
     "nav": {
         "files": "File",
-        "shared": "Condivisi",
+        "shared": "Condivisioni",
         "recent": "Recenti",
         "favorites": "Preferiti",
         "photos": "Foto",
         "music": "Musica",
-        "trash": "Cestino"
+        "trash": "Cestino",
+        "sharedwithme": "Condivisi con me"
     },
     "photos": {
         "empty_state": "Nessuna foto ancora",
@@ -682,5 +683,18 @@
         "files": "file",
         "complete": "{{count}} / {{total}} caricati"
     },
-    "storage_quota_exceeded": "Quota di archiviazione superata"
+    "storage_quota_exceeded": "Quota di archiviazione superata",
+    "sharedwithme": {
+        "pageTitle": "Condiviso con me",
+        "pageDescription": "File e cartelle che altri utenti hanno condiviso con te",
+        "emptyStateTitle": "Niente è ancora condiviso con te",
+        "emptyStateDesc": "Gli elementi condivisi con te da altri utenti appariranno qui",
+        "loadMore": "Carica altri",
+        "sharedBy": "Condiviso da",
+        "colName": "Nome",
+        "colType": "Tipo",
+        "colSharedBy": "Condiviso da",
+        "colDate": "Data condivisione",
+        "colPermissions": "Permessi"
+    }
 }
