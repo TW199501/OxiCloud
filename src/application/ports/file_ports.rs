@@ -11,6 +11,7 @@ use crate::application::services::file_management_service::FileManagementService
 use crate::application::services::file_retrieval_service::FileRetrievalService;
 use crate::application::services::file_upload_service::FileUploadService;
 use crate::common::errors::DomainError;
+use crate::domain::services::authorization::Permission;
 
 // ─────────────────────────────────────────────────────
 // Upload port
@@ -119,7 +120,13 @@ pub trait FileRetrievalUseCase: Send + Sync + 'static {
     ///
     /// Returns `NotFound` if the file does not exist **or** belongs to
     /// another user.  All user-facing handlers should use this method.
-    async fn get_file_owned(&self, id: &str, caller_id: Uuid) -> Result<FileDto, DomainError>;
+    async fn get_file_with_perms(&self, id: &str, caller_id: Uuid) -> Result<FileDto, DomainError>;
+
+    async fn get_file_or_trashed_with_perms(
+        &self,
+        id: &str,
+        caller_id: Uuid,
+    ) -> Result<FileDto, DomainError>;
 
     /// Gets a file by its path (for WebDAV)
     async fn get_file_by_path(&self, path: &str) -> Result<FileDto, DomainError>;
@@ -131,7 +138,7 @@ pub trait FileRetrievalUseCase: Send + Sync + 'static {
     ///
     /// Uses SQL-level `AND user_id` filtering — no in-memory post-filter.
     /// All user-facing list handlers should use this method.
-    async fn list_files_owned(
+    async fn list_files_with_perms(
         &self,
         folder_id: Option<&str>,
         owner_id: Uuid,
@@ -144,7 +151,7 @@ pub trait FileRetrievalUseCase: Send + Sync + 'static {
     ) -> Result<Box<dyn Stream<Item = Result<Bytes, std::io::Error>> + Send>, DomainError>;
 
     /// Gets file content as a stream, enforcing that `caller_id` is the owner.
-    async fn get_file_stream_owned(
+    async fn get_file_stream_with_perms(
         &self,
         id: &str,
         caller_id: Uuid,
@@ -166,7 +173,7 @@ pub trait FileRetrievalUseCase: Send + Sync + 'static {
     ///
     /// Verifies `caller_id` owns the file before returning content.
     /// All user-facing download handlers should use this.
-    async fn get_file_optimized_owned(
+    async fn get_file_optimized_with_perms(
         &self,
         id: &str,
         caller_id: Uuid,
@@ -198,7 +205,7 @@ pub trait FileRetrievalUseCase: Send + Sync + 'static {
     ) -> Result<Box<dyn Stream<Item = Result<Bytes, std::io::Error>> + Send>, DomainError>;
 
     /// Ownership-scoped range stream — verifies caller owns the file first.
-    async fn get_file_range_stream_owned(
+    async fn get_file_range_stream_with_perms(
         &self,
         id: &str,
         caller_id: Uuid,
@@ -238,7 +245,7 @@ pub trait FileRetrievalUseCase: Send + Sync + 'static {
     ///
     /// Used by streaming WebDAV PROPFIND so that each user only sees their
     /// own files, even in shared folder_id namespaces.
-    async fn list_files_batch_for_owner(
+    async fn list_files_batch_with_perms(
         &self,
         folder_id: Option<&str>,
         owner_id: Uuid,
@@ -254,58 +261,41 @@ pub trait FileRetrievalUseCase: Send + Sync + 'static {
     }
 }
 
-// ─────────────────────────────────────────────────────
-// Management port (delete, move)
-// ─────────────────────────────────────────────────────
-
 /// Primary port for file management operations
 pub trait FileManagementUseCase: Send + Sync + 'static {
-    /// Moves a file to another folder (system/internal — no ownership check).
-    async fn move_file(
+    async fn require_permission(
         &self,
+        caller_id: Uuid,
+        permission: Permission,
         file_id: &str,
-        folder_id: Option<String>,
-    ) -> Result<FileDto, DomainError>;
+    ) -> Result<(), DomainError>;
 
     /// Moves a file, enforcing that `caller_id` is the owner.
-    async fn move_file_owned(
+    async fn move_file_with_perms(
         &self,
         file_id: &str,
         caller_id: Uuid,
         folder_id: Option<String>,
-    ) -> Result<FileDto, DomainError>;
-
-    /// Copies a file to another folder (zero-copy with dedup).
-    async fn copy_file(
-        &self,
-        file_id: &str,
-        target_folder_id: Option<String>,
     ) -> Result<FileDto, DomainError>;
 
     /// Copies a file, enforcing that `caller_id` is the owner.
-    async fn copy_file_owned(
+    async fn copy_file_with_perms(
         &self,
         file_id: &str,
         caller_id: Uuid,
         target_folder_id: Option<String>,
     ) -> Result<FileDto, DomainError>;
 
-    /// Renames a file (system/internal — no ownership check).
-    async fn rename_file(&self, file_id: &str, new_name: &str) -> Result<FileDto, DomainError>;
-
     /// Renames a file, enforcing that `caller_id` is the owner.
-    async fn rename_file_owned(
+    async fn rename_file_with_perms(
         &self,
         file_id: &str,
         caller_id: Uuid,
         new_name: &str,
     ) -> Result<FileDto, DomainError>;
 
-    /// Deletes a file (system/internal — no ownership check).
-    async fn delete_file(&self, id: &str) -> Result<(), DomainError>;
-
     /// Deletes a file, enforcing that `caller_id` is the owner.
-    async fn delete_file_owned(&self, id: &str, caller_id: Uuid) -> Result<(), DomainError>;
+    async fn delete_file_with_perms(&self, id: &str, caller_id: Uuid) -> Result<(), DomainError>;
 
     /// Smart delete: trash-first with dedup reference cleanup.
     ///
@@ -314,30 +304,22 @@ pub trait FileManagementUseCase: Send + Sync + 'static {
     /// 3. Decrements the dedup reference count for the content hash.
     ///
     /// Returns `Ok(true)` when trashed, `Ok(false)` when permanently deleted.
-    async fn delete_with_cleanup(&self, id: &str, user_id: Uuid) -> Result<bool, DomainError>;
+    async fn delete_and_cleanup_with_perms(
+        &self,
+        id: &str,
+        user_id: Uuid,
+    ) -> Result<bool, DomainError>;
 
     /// Copies an entire folder subtree atomically (WebDAV COPY Depth: infinity).
+    /// enforcing that `caller_id` owns both the source folder
+    /// and the target parent folder.
     ///
     /// Creates a copy of `source_folder_id` (with optional name override) under
     /// `target_parent_id`, including ALL sub-folders and files. Files are
     /// zero-copy (blob ref_counts incremented in batch).
     ///
     /// Default: returns error (only available with PostgreSQL backend).
-    async fn copy_folder_tree(
-        &self,
-        _source_folder_id: &str,
-        _target_parent_id: Option<String>,
-        _dest_name: Option<String>,
-    ) -> Result<CopyFolderTreeResult, DomainError> {
-        Err(DomainError::internal_error(
-            "FileManagement",
-            "copy_folder_tree not implemented",
-        ))
-    }
-
-    /// Copies a folder tree, enforcing that `caller_id` owns both the source folder
-    /// and the target parent folder.
-    async fn copy_folder_tree_owned(
+    async fn copy_folder_tree_with_perms(
         &self,
         source_folder_id: &str,
         caller_id: Uuid,

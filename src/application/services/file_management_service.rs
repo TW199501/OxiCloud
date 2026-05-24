@@ -1,17 +1,20 @@
 use std::sync::Arc;
 
 use crate::application::dtos::file_dto::FileDto;
-use crate::application::ports::file_lifecycle::FileDeletedHook;
+use crate::application::ports::authorization_ports::AuthorizationEngine;
+use crate::application::ports::file_lifecycle::FileLifecycleHook;
 use crate::application::ports::file_ports::FileManagementUseCase;
-use crate::application::ports::storage_ports::{CopyFolderTreeResult, FileReadPort, FileWritePort};
+use crate::application::ports::storage_ports::{CopyFolderTreeResult, FileWritePort};
 use crate::application::ports::trash_ports::TrashUseCase;
 use crate::application::services::trash_service::TrashService;
 use crate::common::errors::DomainError;
+use crate::domain::services::authorization::{Permission, Resource, Subject};
 use crate::domain::services::path_service::validate_storage_name;
 use crate::infrastructure::repositories::pg::file_blob_read_repository::FileBlobReadRepository;
 use crate::infrastructure::repositories::pg::file_blob_write_repository::FileBlobWriteRepository;
 use crate::infrastructure::repositories::pg::folder_db_repository::FolderDbRepository;
 use crate::infrastructure::services::file_content_cache::FileContentCache;
+use crate::infrastructure::services::pg_acl_engine::PgAclEngine;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
@@ -23,96 +26,74 @@ use uuid::Uuid;
 /// touches ref_count directly.
 pub struct FileManagementService {
     file_repository: Arc<FileBlobWriteRepository>,
-    file_read: Option<Arc<FileBlobReadRepository>>,
-    folder_repo: Option<Arc<FolderDbRepository>>,
     trash_service: Option<Arc<TrashService>>,
     content_cache: Option<Arc<FileContentCache>>,
-    /// Hooks fired after a file is permanently deleted.
-    file_deleted_hooks: Vec<Arc<dyn FileDeletedHook>>,
+    authz: Arc<PgAclEngine>,
+    /// Lifecycle hook dispatcher — fired on file created (copy) and deleted.
+    file_lifecycle_hook: Option<Arc<dyn FileLifecycleHook>>,
 }
 
 impl FileManagementService {
-    /// Creates a new FileManagementService.
-    pub fn new(file_repository: Arc<FileBlobWriteRepository>) -> Self {
-        Self {
-            file_repository,
-            file_read: None,
-            folder_repo: None,
-            trash_service: None,
-            content_cache: None,
-            file_deleted_hooks: Vec::new(),
-        }
-    }
-
-    /// Creates a FileManagementService with a trash service, read repo, and folder repo for ownership checks.
+    /// Creates a FileManagementService with a trash service, content cache
+    /// and the ReBAC authorization engine. File/folder owner lookups (used
+    /// for owner short-circuit inside the engine) are now the engine's
+    /// responsibility — this service no longer holds direct repo references
+    /// for ownership.
     pub fn with_trash(
         file_repository: Arc<FileBlobWriteRepository>,
         trash_service: Option<Arc<TrashService>>,
-        file_read: Option<Arc<FileBlobReadRepository>>,
-        folder_repo: Option<Arc<FolderDbRepository>>,
+        _file_read: Option<Arc<FileBlobReadRepository>>,
+        _folder_repo: Option<Arc<FolderDbRepository>>,
         content_cache: Option<Arc<FileContentCache>>,
+        authz: Arc<PgAclEngine>,
     ) -> Self {
         Self {
             file_repository,
-            file_read,
-            folder_repo,
             trash_service,
             content_cache,
-            file_deleted_hooks: Vec::new(),
+            authz,
+            file_lifecycle_hook: None,
         }
     }
 
-    /// Registers a hook to fire after a file is permanently deleted.
-    pub fn with_file_deleted_hook(mut self, hook: Arc<dyn FileDeletedHook>) -> Self {
-        self.file_deleted_hooks.push(hook);
+    /// Sets the lifecycle hook dispatcher (thumbnails, audio metadata, …).
+    pub fn with_file_lifecycle_hook(mut self, hook: Arc<dyn FileLifecycleHook>) -> Self {
+        self.file_lifecycle_hook = Some(hook);
         self
     }
 
-    /// Verifies ownership via the read repository.
-    async fn verify_owner(&self, file_id: &str, caller_id: Uuid) -> Result<(), DomainError> {
-        if let Some(read) = &self.file_read {
-            read.verify_file_owner(file_id, caller_id).await
-        } else {
-            // Fallback: no read repo injected — deny by default (fail-closed)
-            Err(DomainError::internal_error(
-                "FileManagement",
-                "Ownership verification unavailable",
-            ))
-        }
-    }
-
-    /// Verifies that the target folder is owned by the caller.
-    /// If folder_id is None (root), ownership is implicitly granted.
-    async fn verify_target_folder_owner(
+    /// Engine check for a file resource. Parses the id into a `Uuid` and
+    /// requires the specified permission.
+    async fn require_file_perm(
         &self,
-        folder_id: &Option<String>,
+        file_id: &str,
+        perm: Permission,
         caller_id: Uuid,
     ) -> Result<(), DomainError> {
-        let folder_id = match folder_id {
-            Some(id) => id,
-            None => return Ok(()), // Moving to root is always allowed
-        };
-
-        if let Some(folder_repo) = &self.folder_repo {
-            let folder_owner = folder_repo.get_folder_user_id(folder_id).await?;
-            if folder_owner != caller_id {
-                return Err(DomainError::not_found(
-                    "Folder",
-                    "Target folder not found or access denied",
-                ));
-            }
-            Ok(())
-        } else {
-            // Fallback: no folder repo injected — deny by default (fail-closed)
-            Err(DomainError::internal_error(
-                "FileManagement",
-                "Folder ownership verification unavailable",
-            ))
-        }
+        let uuid = Uuid::parse_str(file_id).map_err(|_| DomainError::not_found("File", file_id))?;
+        self.authz
+            .require(Subject::User(caller_id), perm, Resource::File(uuid))
+            .await
     }
-}
 
-impl FileManagementUseCase for FileManagementService {
+    /// Engine check for a target folder. `None` is allowed (root namespace,
+    /// implicitly owned by the caller).
+    async fn require_target_folder_perm(
+        &self,
+        folder_id: Option<&str>,
+        perm: Permission,
+        caller_id: Uuid,
+    ) -> Result<(), DomainError> {
+        let Some(target) = folder_id else {
+            return Ok(());
+        };
+        let uuid = Uuid::parse_str(target).map_err(|_| DomainError::not_found("Folder", target))?;
+        self.authz
+            .require(Subject::User(caller_id), perm, Resource::Folder(uuid))
+            .await
+    }
+
+    //impl FileManagementPrivateUseCase for FileManagementService {
     async fn move_file(
         &self,
         file_id: &str,
@@ -142,20 +123,6 @@ impl FileManagementUseCase for FileManagementService {
         Ok(FileDto::from(moved_file))
     }
 
-    async fn move_file_owned(
-        &self,
-        file_id: &str,
-        caller_id: Uuid,
-        folder_id: Option<String>,
-    ) -> Result<FileDto, DomainError> {
-        // Verify file ownership first
-        self.verify_owner(file_id, caller_id).await?;
-        // Verify target folder ownership (prevents file from "disappearing")
-        self.verify_target_folder_owner(&folder_id, caller_id)
-            .await?;
-        self.move_file(file_id, folder_id).await
-    }
-
     async fn copy_file(
         &self,
         file_id: &str,
@@ -182,19 +149,11 @@ impl FileManagementUseCase for FileManagementService {
             copied_file.folder_id()
         );
 
-        Ok(FileDto::from(copied_file))
-    }
-
-    async fn copy_file_owned(
-        &self,
-        file_id: &str,
-        caller_id: Uuid,
-        target_folder_id: Option<String>,
-    ) -> Result<FileDto, DomainError> {
-        self.verify_owner(file_id, caller_id).await?;
-        self.verify_target_folder_owner(&target_folder_id, caller_id)
-            .await?;
-        self.copy_file(file_id, target_folder_id).await
+        let dto = FileDto::from(copied_file);
+        if let Some(hook) = &self.file_lifecycle_hook {
+            hook.on_file_copied(&dto.id, &dto.etag, &dto.mime_type, file_id);
+        }
+        Ok(dto)
     }
 
     async fn rename_file(&self, file_id: &str, new_name: &str) -> Result<FileDto, DomainError> {
@@ -224,76 +183,17 @@ impl FileManagementUseCase for FileManagementService {
         Ok(FileDto::from(renamed_file))
     }
 
-    async fn rename_file_owned(
-        &self,
-        file_id: &str,
-        caller_id: Uuid,
-        new_name: &str,
-    ) -> Result<FileDto, DomainError> {
-        self.verify_owner(file_id, caller_id).await?;
-        self.rename_file(file_id, new_name).await
-    }
-
     async fn delete_file(&self, id: &str) -> Result<(), DomainError> {
-        self.file_repository.delete_file(id).await?;
-        if let Some(cc) = &self.content_cache {
-            cc.invalidate(id).await;
-        }
-        for hook in &self.file_deleted_hooks {
-            hook.on_file_deleted(id).await;
-        }
-        Ok(())
-    }
-
-    async fn delete_file_owned(&self, id: &str, caller_id: Uuid) -> Result<(), DomainError> {
-        self.verify_owner(id, caller_id).await?;
-        self.delete_file(id).await
-    }
-
-    /// Smart delete: trash-first with dedup reference cleanup.
-    ///
-    /// Blob ref_count bookkeeping is handled entirely by the PG trigger
-    /// `trg_files_decrement_blob_ref` which fires on DELETE FROM storage.files.
-    /// We do NOT decrement here — trashing is a soft-delete (UPDATE, not DELETE)
-    /// so the blob must remain referenced until the file is permanently deleted.
-    async fn delete_with_cleanup(&self, id: &str, user_id: Uuid) -> Result<bool, DomainError> {
-        // Step 1: Try trash (soft delete — file row stays, blob stays referenced)
-        if let Some(trash) = &self.trash_service {
-            info!("Moving file to trash: {}", id);
-            match trash.move_to_trash(id, "file", user_id).await {
-                Ok(_) => {
-                    info!("File successfully moved to trash: {}", id);
-                    // Invalidate content cache — trashed files must not be served.
-                    if let Some(cc) = &self.content_cache {
-                        cc.invalidate(id).await;
-                    }
-                    // Do NOT decrement blob ref here — the file row still exists
-                    // (is_trashed = TRUE). The trigger will decrement when the
-                    // row is actually DELETEd during trash emptying.
-                    return Ok(true); // trashed
-                }
-                Err(err) => {
-                    error!("Could not move file to trash: {:?}", err);
-                    warn!("Falling back to permanent delete");
-                    // fall through
-                }
-            }
-        } else {
-            warn!("Trash service not available, using permanent delete");
-        }
-
-        // Step 2: Permanent delete — trigger handles blob ref_count
         warn!("Permanently deleting file: {}", id);
         self.file_repository.delete_file(id).await?;
         if let Some(cc) = &self.content_cache {
             cc.invalidate(id).await;
         }
-        for hook in &self.file_deleted_hooks {
-            hook.on_file_deleted(id).await;
+        if let Some(hook) = &self.file_lifecycle_hook {
+            hook.on_file_deleted(id);
         }
         info!("File permanently deleted: {}", id);
-
-        Ok(false) // permanently deleted
+        Ok(())
     }
 
     async fn copy_folder_tree(
@@ -326,29 +226,122 @@ impl FileManagementUseCase for FileManagementService {
 
         Ok(result)
     }
+}
 
-    async fn copy_folder_tree_owned(
+impl FileManagementUseCase for FileManagementService {
+    async fn require_permission(
+        &self,
+        caller_id: Uuid,
+        permission: Permission,
+        file_id: &str,
+    ) -> Result<(), DomainError> {
+        let uuid = Uuid::parse_str(file_id).map_err(|_| DomainError::not_found("File", file_id))?;
+        self.authz
+            .require(Subject::User(caller_id), permission, Resource::File(uuid))
+            .await
+    }
+
+    async fn move_file_with_perms(
+        &self,
+        file_id: &str,
+        caller_id: Uuid,
+        folder_id: Option<String>,
+    ) -> Result<FileDto, DomainError> {
+        // Move = Update on the file + Create on the target folder (if any).
+        self.require_file_perm(file_id, Permission::Update, caller_id)
+            .await?;
+        self.require_target_folder_perm(folder_id.as_deref(), Permission::Create, caller_id)
+            .await?;
+        self.move_file(file_id, folder_id).await
+    }
+
+    async fn copy_file_with_perms(
+        &self,
+        file_id: &str,
+        caller_id: Uuid,
+        target_folder_id: Option<String>,
+    ) -> Result<FileDto, DomainError> {
+        // Copy = Read on the source file + Create on the target folder.
+        self.require_file_perm(file_id, Permission::Read, caller_id)
+            .await?;
+        self.require_target_folder_perm(target_folder_id.as_deref(), Permission::Create, caller_id)
+            .await?;
+        self.copy_file(file_id, target_folder_id).await
+    }
+
+    async fn rename_file_with_perms(
+        &self,
+        file_id: &str,
+        caller_id: Uuid,
+        new_name: &str,
+    ) -> Result<FileDto, DomainError> {
+        self.require_file_perm(file_id, Permission::Update, caller_id)
+            .await?;
+        self.rename_file(file_id, new_name).await
+    }
+
+    async fn delete_file_with_perms(&self, id: &str, caller_id: Uuid) -> Result<(), DomainError> {
+        self.require_file_perm(id, Permission::Delete, caller_id)
+            .await?;
+        self.delete_file(id).await
+    }
+
+    /// Smart delete: trash-first with dedup reference cleanup.
+    ///
+    /// Blob ref_count bookkeeping is handled entirely by the PG trigger
+    /// `trg_files_decrement_blob_ref` which fires on DELETE FROM storage.files.
+    /// We do NOT decrement here — trashing is a soft-delete (UPDATE, not DELETE)
+    /// so the blob must remain referenced until the file is permanently deleted.
+    async fn delete_and_cleanup_with_perms(
+        &self,
+        id: &str,
+        caller_id: Uuid,
+    ) -> Result<bool, DomainError> {
+        self.require_file_perm(id, Permission::Delete, caller_id)
+            .await?;
+        // Step 1: Try trash (soft delete — file row stays, blob stays referenced)
+        if let Some(trash) = &self.trash_service {
+            info!("Moving file to trash: {}", id);
+            match trash.move_to_trash(id, "file", caller_id).await {
+                Ok(_) => {
+                    info!("File successfully moved to trash: {}", id);
+                    // Invalidate content cache — trashed files must not be served.
+                    if let Some(cc) = &self.content_cache {
+                        cc.invalidate(id).await;
+                    }
+                    // Do NOT decrement blob ref here — the file row still exists
+                    // (is_trashed = TRUE). The trigger will decrement when the
+                    // row is actually DELETEd during trash emptying.
+                    return Ok(true); // trashed
+                }
+                Err(err) => {
+                    error!("Could not move file to trash: {:?}", err);
+                    warn!("Falling back to permanent delete");
+                    // fall through
+                }
+            }
+        } else {
+            warn!("Trash service not available, using permanent delete");
+        }
+
+        // Step 2: Permanent delete — trigger handles blob ref_count
+
+        self.delete_file(id).await?;
+
+        Ok(false) // permanently deleted
+    }
+
+    async fn copy_folder_tree_with_perms(
         &self,
         source_folder_id: &str,
         caller_id: Uuid,
         target_parent_id: Option<String>,
         dest_name: Option<String>,
     ) -> Result<CopyFolderTreeResult, DomainError> {
-        if let Some(folder_repo) = &self.folder_repo {
-            let owner = folder_repo.get_folder_user_id(source_folder_id).await?;
-            if owner != caller_id {
-                return Err(DomainError::not_found(
-                    "Folder",
-                    "Source folder not found or access denied",
-                ));
-            }
-        } else {
-            return Err(DomainError::internal_error(
-                "FileManagement",
-                "Folder ownership verification unavailable",
-            ));
-        }
-        self.verify_target_folder_owner(&target_parent_id, caller_id)
+        // copy_folder_tree = Read on the source folder + Create on the target parent.
+        self.require_target_folder_perm(Some(source_folder_id), Permission::Read, caller_id)
+            .await?;
+        self.require_target_folder_perm(target_parent_id.as_deref(), Permission::Create, caller_id)
             .await?;
         self.copy_folder_tree(source_folder_id, target_parent_id, dest_name)
             .await

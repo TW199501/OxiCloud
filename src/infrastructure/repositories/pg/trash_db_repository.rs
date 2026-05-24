@@ -52,6 +52,7 @@ impl TrashDbRepository {
         item_type: String,
         user_id: Uuid,
         trashed_at: Option<DateTime<Utc>>,
+        original_path: String,
     ) -> TrashedItem {
         let trashed_at = trashed_at.unwrap_or_else(Utc::now);
         let deletion_date = trashed_at + chrono::Duration::days(self.retention_days);
@@ -69,7 +70,7 @@ impl TrashDbRepository {
             user_id, // owner
             item_type_enum,
             name.clone(),
-            String::new(), // original_path — not stored separately in soft-delete model
+            original_path, // parent folder path at time of trash
             trashed_at,
             deletion_date,
         )
@@ -85,33 +86,38 @@ impl TrashRepository for TrashDbRepository {
     }
 
     async fn get_trash_items(&self, user_id: &Uuid) -> Result<Vec<TrashedItem>> {
-        let rows = sqlx::query_as::<_, (Uuid, String, String, Uuid, Option<DateTime<Utc>>)>(
-            r#"
-            SELECT id, name, item_type, user_id, trashed_at
-              FROM storage.trash_items
-             WHERE user_id = $1
-             ORDER BY trashed_at DESC
+        let rows =
+            sqlx::query_as::<_, (Uuid, String, String, Uuid, Option<DateTime<Utc>>, String)>(
+                r#"
+            SELECT t.id, t.name, t.item_type, t.user_id, t.trashed_at,
+                   COALESCE(p.path || '/' || t.name, t.name) AS original_path
+              FROM storage.trash_items t
+              LEFT JOIN storage.folders p ON p.id = t.original_parent_id
+             WHERE t.user_id = $1
+             ORDER BY t.trashed_at DESC
             "#,
-        )
-        .bind(user_id)
-        .fetch_all(self.pool.as_ref())
-        .await
-        .map_err(|e| DomainError::internal_error("TrashDb", format!("list: {e}")))?;
+            )
+            .bind(user_id)
+            .fetch_all(self.pool.as_ref())
+            .await
+            .map_err(|e| DomainError::internal_error("TrashDb", format!("list: {e}")))?;
 
         Ok(rows
             .into_iter()
-            .map(|(id, name, item_type, uid, trashed_at)| {
-                self.row_to_trashed_item(id, name, item_type, uid, trashed_at)
+            .map(|(id, name, item_type, uid, trashed_at, path)| {
+                self.row_to_trashed_item(id, name, item_type, uid, trashed_at, path)
             })
             .collect())
     }
 
     async fn get_trash_item(&self, id: &Uuid, user_id: &Uuid) -> Result<Option<TrashedItem>> {
-        let row = sqlx::query_as::<_, (Uuid, String, String, Uuid, Option<DateTime<Utc>>)>(
+        let row = sqlx::query_as::<_, (Uuid, String, String, Uuid, Option<DateTime<Utc>>, String)>(
             r#"
-            SELECT id, name, item_type, user_id, trashed_at
-              FROM storage.trash_items
-             WHERE id = $1 AND user_id = $2
+            SELECT t.id, t.name, t.item_type, t.user_id, t.trashed_at,
+                   COALESCE(p.path || '/' || t.name, t.name) AS original_path
+              FROM storage.trash_items t
+              LEFT JOIN storage.folders p ON p.id = t.original_parent_id
+             WHERE t.id = $1 AND t.user_id = $2
             "#,
         )
         .bind(id)
@@ -120,8 +126,8 @@ impl TrashRepository for TrashDbRepository {
         .await
         .map_err(|e| DomainError::internal_error("TrashDb", format!("get: {e}")))?;
 
-        Ok(row.map(|(id, name, item_type, uid, trashed_at)| {
-            self.row_to_trashed_item(id, name, item_type, uid, trashed_at)
+        Ok(row.map(|(id, name, item_type, uid, trashed_at, path)| {
+            self.row_to_trashed_item(id, name, item_type, uid, trashed_at, path)
         }))
     }
 
@@ -155,6 +161,17 @@ impl TrashRepository for TrashDbRepository {
             .map_err(|e| DomainError::internal_error("TrashDb", format!("clear folders: {e}")))?;
 
         Ok(())
+    }
+
+    async fn get_all_trashed_file_ids(&self, user_id: &Uuid) -> Result<Vec<String>> {
+        let rows = sqlx::query_scalar::<_, String>(
+            "SELECT id::text FROM storage.files WHERE user_id = $1 AND is_trashed = TRUE",
+        )
+        .bind(user_id)
+        .fetch_all(self.pool.as_ref())
+        .await
+        .map_err(|e| DomainError::internal_error("TrashDb", format!("all_trashed_files: {e}")))?;
+        Ok(rows)
     }
 
     async fn delete_expired_bulk(&self) -> Result<(u64, u64)> {

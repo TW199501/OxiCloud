@@ -38,11 +38,14 @@ use crate::infrastructure::services::file_content_cache::{
 use crate::infrastructure::services::file_system_i18n_service::FileSystemI18nService;
 use crate::infrastructure::services::nextcloud_chunked_upload_service::NextcloudChunkedUploadService;
 use crate::infrastructure::services::path_service::PathService;
+use crate::infrastructure::services::pg_acl_engine::PgAclEngine;
 use crate::infrastructure::services::trash_cleanup_service::TrashCleanupService;
 
 use crate::application::services::app_password_service::AppPasswordService;
+use crate::application::services::blob_lifecycle_service::BlobLifecycleService;
 use crate::application::services::calendar_service::CalendarService;
 use crate::application::services::device_auth_service::DeviceAuthService;
+use crate::application::services::file_lifecycle_service::FileLifecycleService;
 use crate::application::services::music_service::MusicService;
 use crate::application::services::storage_usage_service::StorageUsageService;
 use crate::application::services::wopi_lock_service::WopiLockService;
@@ -258,6 +261,12 @@ impl AppServiceFactory {
             tracing::info!("Blob storage LRU disk cache enabled");
         }
 
+        // Blob lifecycle — thumbnail disk-file cleanup when blob ref_count hits zero.
+        // ThumbnailService (not ThumbnailRefreshHook) is used here to avoid a circular
+        // Arc: DedupService→BlobLifecycleService→ThumbnailRefreshHook→DedupService.
+        let blob_lifecycle =
+            Arc::new(BlobLifecycleService::new().with_hook(thumbnail_service.clone()));
+
         // Deduplication service — PRIMARY blob storage engine (PostgreSQL-backed index)
         let dedup_service = Arc::new(
             crate::infrastructure::services::dedup_service::DedupService::new(
@@ -265,7 +274,7 @@ impl AppServiceFactory {
                 db_pool.clone(),
                 maintenance_pool.clone(),
             )
-            .add_blob_hook(thumbnail_service.clone()),
+            .with_blob_lifecycle(blob_lifecycle),
         );
         dedup_service.initialize().await?;
 
@@ -273,10 +282,30 @@ impl AppServiceFactory {
             "Core services initialized: path service, file content cache, thumbnails, chunked upload, image transcode, dedup (PRIMARY blob storage)"
         );
 
+        // Audio metadata service — created here so it can be wired into file_lifecycle.
+        let audio_metadata_service = self.create_audio_metadata_service(db_pool);
+
+        // ThumbnailRefreshHook: handles FileLifecycleHook events (create/update/delete).
+        // Implemented on ThumbnailRefreshHook (not ThumbnailService) to avoid circular Arc:
+        //   DedupService → BlobLifecycleService → ThumbnailRefreshHook → DedupService.
+        let thumbnail_refresh_hook = Arc::new(ThumbnailRefreshHook::new(
+            thumbnail_service.clone(),
+            dedup_service.clone(),
+        ));
+
+        // Build the unified FileLifecycleService dispatcher.
+        let mut fls = FileLifecycleService::new().with_hook(thumbnail_refresh_hook);
+        if let Some(audio) = &audio_metadata_service {
+            fls = fls.with_hook(audio.clone());
+        }
+        let file_lifecycle = Arc::new(fls);
+
         Ok(CoreServices {
             path_service,
             file_content_cache,
             thumbnail_service,
+            file_lifecycle,
+            audio_metadata_service,
             chunked_upload_service,
             image_transcode_service,
             dedup_service,
@@ -349,31 +378,28 @@ impl AppServiceFactory {
         core: &CoreServices,
         repos: &RepositoryServices,
         trash_service: Option<Arc<TrashService>>,
-        db_pool: &Arc<PgPool>,
+        authz: &Arc<PgAclEngine>,
     ) -> ApplicationServices {
         // Main services
-        let folder_service = Arc::new(FolderService::new(repos.folder_repository.clone()));
-
-        // Refactored services with all infrastructure ports
-        // In blob model, dedup is handled by the repository — no separate write-behind needed
-        let thumbnail_refresh_hook = Arc::new(ThumbnailRefreshHook::new(
-            core.thumbnail_service.clone(),
-            core.dedup_service.clone(),
+        let folder_service = Arc::new(FolderService::new(
+            repos.folder_repository.clone(),
+            authz.clone(),
         ));
+
         let file_upload_service = Arc::new(
             FileUploadService::new_with_read(
                 repos.file_write_repository.clone(),
                 repos.file_read_repository.clone(),
             )
             .with_content_cache(core.file_content_cache.clone())
-            .with_file_created_hook(thumbnail_refresh_hook.clone())
-            .with_file_updated_hook(thumbnail_refresh_hook),
+            .with_file_lifecycle_hook(core.file_lifecycle.clone()),
         );
 
         let file_retrieval_service = Arc::new(FileRetrievalService::new_with_cache(
             repos.file_read_repository.clone(),
             core.file_content_cache.clone(),
             core.image_transcode_service.clone(),
+            authz.clone(),
         ));
 
         // FileManagementService — ref_count handled by PG trigger, no dedup port needed
@@ -384,13 +410,15 @@ impl AppServiceFactory {
                 Some(repos.file_read_repository.clone()),
                 Some(repos.folder_repository.clone()),
                 Some(core.file_content_cache.clone()),
+                authz.clone(),
             )
-            .with_file_deleted_hook(core.thumbnail_service.clone()),
+            .with_file_lifecycle_hook(core.file_lifecycle.clone()),
         );
 
         let file_use_case_factory = Arc::new(AppFileUseCaseFactory::new(
             repos.file_read_repository.clone(),
             repos.file_write_repository.clone(),
+            authz.clone(),
         ));
 
         let i18n_service = Arc::new(I18nApplicationService::new(repos.i18n_repository.clone()));
@@ -420,7 +448,7 @@ impl AppServiceFactory {
             share_service: None,     // Configured later with create_share_service
             favorites_service: None, // Configured later with create_favorites_service
             recent_service: None,    // Configured later with create_recent_service
-            audio_metadata_service: self.create_audio_metadata_service(db_pool),
+            audio_metadata_service: core.audio_metadata_service.clone(),
         }
     }
 
@@ -445,6 +473,7 @@ impl AppServiceFactory {
         &self,
         repos: &RepositoryServices,
         core: &CoreServices,
+        authz: &Arc<PgAclEngine>,
     ) -> Option<Arc<TrashService>> {
         if !self.config.features.enable_trash {
             tracing::info!("Trash service is disabled in configuration");
@@ -454,16 +483,19 @@ impl AppServiceFactory {
         let trash_repo = repos.trash_repository.as_ref()?;
 
         // Wire ports directly to TrashService — no adapter layer needed
-        let service = Arc::new(TrashService::new(
-            trash_repo.clone(),
-            repos.file_read_repository.clone(),
-            repos.file_write_repository.clone(),
-            repos.folder_repository.clone(),
-            self.config.storage.trash_retention_days,
-            core.dedup_service.clone(),
-            Some(core.thumbnail_service.clone()),
-            Some(core.file_content_cache.clone()),
-        ));
+        let service = Arc::new(
+            TrashService::new(
+                trash_repo.clone(),
+                repos.file_read_repository.clone(),
+                repos.file_write_repository.clone(),
+                repos.folder_repository.clone(),
+                self.config.storage.trash_retention_days,
+                core.dedup_service.clone(),
+                Some(core.file_content_cache.clone()),
+                authz.clone(),
+            )
+            .with_file_deleted_hook(core.file_lifecycle.clone()),
+        );
 
         // Initialize cleanup service (bulk-deletes expired items in 2 SQL queries)
         let cleanup_service = TrashCleanupService::new(
@@ -602,12 +634,22 @@ impl AppServiceFactory {
         // 2. Repository services (requires PgPool for all metadata)
         let repos = self.create_repository_services(&core, &pool);
 
-        // 3. Trash service (needed before application services)
-        let trash_service = self.create_trash_service(&repos, &core).await;
+        // 3a. Authorization engine — must exist before application services
+        // because services hold an Arc<PgAclEngine> for ReBAC checks.
+        let authorization = build_authorization_engine(
+            pool.clone(),
+            repos.folder_repository.clone(),
+            repos.file_read_repository.clone(),
+        );
 
-        // 4. Application services (with trash already wired)
+        // 3b. Trash service (needed before application services)
+        let trash_service = self
+            .create_trash_service(&repos, &core, &authorization)
+            .await;
+
+        // 4. Application services (with trash + authz already wired)
         let mut apps =
-            self.create_application_services(&core, &repos, trash_service.clone(), &pool);
+            self.create_application_services(&core, &repos, trash_service.clone(), &authorization);
 
         // 5. Share service
         let share_service = self.create_share_service(&repos, &pool);
@@ -777,6 +819,7 @@ impl AppServiceFactory {
             path_resolver: None,
             webdav_lock_store:
                 crate::infrastructure::services::webdav_lock_service::create_webdav_lock_store(),
+            authorization,
         };
 
         // 9b. Wire admin settings service when auth is available
@@ -841,8 +884,8 @@ impl AppServiceFactory {
                 tracing::warn!("╔══════════════════════════════════════════════════════════╗");
                 tracing::warn!("║  SYSTEM NOT INITIALIZED — first admin setup required     ║");
                 tracing::warn!("║                                                          ║");
-                tracing::warn!("║  Open the web UI to create the first admin account.       ║");
-                tracing::warn!("║  The setup page is available until an admin is created.    ║");
+                tracing::warn!("║  Open the web UI to create the first admin account.      ║");
+                tracing::warn!("║  The setup page is available until an admin is created.  ║");
                 tracing::warn!("╚══════════════════════════════════════════════════════════╝");
             } else {
                 tracing::info!("System already initialized — setup endpoint disabled");
@@ -995,6 +1038,9 @@ pub struct CoreServices {
     pub path_service: Arc<PathService>,
     pub file_content_cache: Arc<FileContentCache>,
     pub thumbnail_service: Arc<ThumbnailService>,
+    /// Composite lifecycle dispatcher — wires thumbnails + audio metadata for all file events.
+    pub file_lifecycle: Arc<FileLifecycleService>,
+    pub audio_metadata_service: Option<Arc<AudioMetadataService>>,
     pub chunked_upload_service: Arc<ChunkedUploadService>,
     pub image_transcode_service: Arc<ImageTranscodeService>,
     pub dedup_service: Arc<DedupService>,
@@ -1092,6 +1138,38 @@ pub struct AppState {
         Option<Arc<crate::infrastructure::services::path_resolver_service::PathResolverService>>,
     pub webdav_lock_store:
         Arc<crate::infrastructure::services::webdav_lock_service::WebDavLockStore>,
+    /// ReBAC authorization engine — all service-layer permission checks go
+    /// through this. Concrete type today is `PgAclEngine`; the
+    /// `AuthorizationEngine` trait describes the contract. When alternate
+    /// implementations land (OpenFGA, cached decorator), swap this field for
+    /// an enum dispatcher or `Arc<dyn AuthorizationEngine>` (with
+    /// `async_trait` boxing).
+    pub authorization: Arc<crate::infrastructure::services::pg_acl_engine::PgAclEngine>,
 }
 
 // All AppState construction is done via struct literal in build_app_state().
+
+/// Builds the authorization engine. Today this only constructs `PgAclEngine`;
+/// the `OXICLOUD_AUTHZ_ENGINE` env var is reserved for future alternate
+/// implementations (e.g. `openfga`).
+fn build_authorization_engine(
+    pool: Arc<PgPool>,
+    folder_repo: Arc<
+        crate::infrastructure::repositories::pg::folder_db_repository::FolderDbRepository,
+    >,
+    file_repo: Arc<
+        crate::infrastructure::repositories::pg::file_blob_read_repository::FileBlobReadRepository,
+    >,
+) -> Arc<crate::infrastructure::services::pg_acl_engine::PgAclEngine> {
+    use crate::infrastructure::services::pg_acl_engine::PgAclEngine;
+
+    if let Ok(other) = std::env::var("OXICLOUD_AUTHZ_ENGINE")
+        && other != "postgres"
+        && !other.is_empty()
+    {
+        panic!(
+            "OXICLOUD_AUTHZ_ENGINE={other:?} is not yet supported. Only 'postgres' is implemented; leave the variable unset to use the default."
+        );
+    }
+    Arc::new(PgAclEngine::new(pool, folder_repo, file_repo))
+}

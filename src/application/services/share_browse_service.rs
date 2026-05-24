@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 use crate::application::dtos::folder_listing_dto::FolderListingDto;
 use crate::application::ports::file_ports::FileRetrievalUseCase;
-use crate::application::ports::inbound::FolderUseCase;
+use crate::application::ports::folder_ports::FolderUseCase;
 use crate::application::services::file_retrieval_service::FileRetrievalService;
 use crate::application::services::folder_service::FolderService;
 use crate::application::services::share_service::ShareService;
@@ -179,9 +179,9 @@ impl ShareBrowseService {
     ) -> Result<FolderListingDto, DomainError> {
         let (folders_res, files_res) = tokio::join!(
             self.folder_service
-                .list_folders_for_owner(Some(parent_folder_id), owner_id),
+                .list_folders_with_perms(Some(parent_folder_id), owner_id),
             self.file_retrieval
-                .list_files_owned(Some(parent_folder_id), owner_id),
+                .list_files_with_perms(Some(parent_folder_id), owner_id),
         );
         Ok(FolderListingDto {
             folders: folders_res?,

@@ -11,17 +11,16 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use utoipa::ToSchema;
 
-use crate::application::dtos::file_dto::FileDto;
-use crate::application::ports::file_ports::OptimizedFileContent;
 use crate::application::ports::file_ports::{
     FileManagementUseCase, FileRetrievalUseCase, FileUploadUseCase,
 };
 use crate::application::ports::storage_ports::{FileReadPort, StorageUsagePort};
 use crate::application::ports::thumbnail_ports::ThumbnailPort;
+use crate::application::ports::{file_ports::OptimizedFileContent, folder_ports::FolderUseCase};
 use crate::common::di::AppState;
-use crate::infrastructure::services::audio_metadata_service::AudioMetadataService;
 use crate::interfaces::errors::AppError;
 use crate::interfaces::middleware::auth::AuthUser;
+use crate::{application::dtos::file_dto::FileDto, domain::services::authorization::Permission};
 use std::sync::Arc;
 
 /**
@@ -85,6 +84,7 @@ impl FileHandler {
 
         tracing::debug!("📤 Processing streaming file upload (hash-on-write)");
 
+        // caveat: if folder_id field is given after check can fails
         while let Some(field) = multipart.next_field().await.unwrap_or(None) {
             let name = field.name().unwrap_or("").to_string();
 
@@ -115,24 +115,24 @@ impl FileHandler {
                     .unwrap_or("application/octet-stream")
                     .to_string();
 
-                // ── SECURITY: Verify folder ownership before upload (IDOR V-03 fix) ──
-                if let Some(ref fid) = folder_id {
-                    use crate::application::ports::inbound::FolderUseCase;
-                    let folder_service = &state.applications.folder_service;
-                    if folder_service
-                        .get_folder_owned(fid, auth_user.id)
+                // ── Fail-fast pre-check: verify the caller can Create inside
+                // the target folder BEFORE spooling the multipart body to disk.
+                // The upload service re-checks at write time — this is a
+                // UX/resource optimization, not the security boundary.
+                if let Some(ref fid) = folder_id
+                    && let Err(err) = state
+                        .applications
+                        .folder_service_concrete
+                        .require_permission(auth_user.id, Permission::Create, fid)
                         .await
-                        .is_err()
-                    {
-                        tracing::warn!(
-                            "⛔ UPLOAD REJECTED (IDOR): user='{}' attempted upload to folder '{}' owned by another user",
-                            auth_user.username,
-                            fid,
-                        );
-                        return Err(Self::domain_error_response(
-                            crate::common::errors::DomainError::not_found("Folder", fid),
-                        ));
-                    }
+                {
+                    tracing::warn!(
+                        "⛔ UPLOAD REJECTED: user='{}' folder='{}' err='{}'",
+                        auth_user.username,
+                        fid,
+                        err
+                    );
+                    return Err(Self::domain_error_response(err));
                 }
 
                 // ── Early quota check (before spooling to disk) ──────
@@ -328,6 +328,16 @@ impl FileHandler {
     ) -> impl IntoResponse {
         use crate::application::ports::thumbnail_ports::ThumbnailSize;
 
+        // check first that user can access this resource
+        if let Err(err) = state
+            .applications
+            .file_management_service
+            .require_permission(auth_user.id, Permission::Read, &id)
+            .await
+        {
+            return AppError::from(err).into_response();
+        }
+
         let thumbnail_service = &state.core.thumbnail_service;
 
         let thumb_size = match size.as_str() {
@@ -385,7 +395,7 @@ impl FileHandler {
         let file_retrieval_service = &state.applications.file_retrieval_service;
 
         let file = match file_retrieval_service
-            .get_file_owned(&id, auth_user.id)
+            .get_file_or_trashed_with_perms(&id, auth_user.id)
             .await
         {
             Ok(f) => f,
@@ -478,6 +488,16 @@ impl FileHandler {
     ) -> impl IntoResponse {
         use crate::application::ports::thumbnail_ports::ThumbnailSize;
 
+        // check first that user can access this resource
+        if let Err(err) = state
+            .applications
+            .file_management_service
+            .require_permission(auth_user.id, Permission::Update, &id)
+            .await
+        {
+            return AppError::from(err).into_response();
+        }
+
         let thumbnail_service = &state.core.thumbnail_service;
 
         // Validate size
@@ -508,7 +528,7 @@ impl FileHandler {
         // Validate file ownership
         let file_retrieval_service = &state.applications.file_retrieval_service;
         if let Err(err) = file_retrieval_service
-            .get_file_owned(&id, auth_user.id)
+            .get_file_with_perms(&id, auth_user.id)
             .await
         {
             return AppError::from(err).into_response();
@@ -545,7 +565,7 @@ impl FileHandler {
         let retrieval = &state.applications.file_retrieval_service;
 
         // ── Get file metadata (ownership-scoped) ────────────────────────
-        let file_dto = match retrieval.get_file_owned(&id, auth_user.id).await {
+        let file_dto = match retrieval.get_file_with_perms(&id, auth_user.id).await {
             Ok(f) => f,
             Err(err) => {
                 return AppError::from(err).into_response();
@@ -603,7 +623,7 @@ impl FileHandler {
                         Self::content_disposition(&file_dto.name, &file_dto.mime_type, &params);
 
                     match retrieval
-                        .get_file_range_stream_owned(&id, auth_user.id, start, Some(end + 1))
+                        .get_file_range_stream_with_perms(&id, auth_user.id, start, Some(end + 1))
                         .await
                     {
                         Ok(stream) => {
@@ -713,7 +733,10 @@ impl FileHandler {
         tracing::info!("API: Listing files with folder_id: {:?}", folder_id);
 
         let retrieval = &state.applications.file_retrieval_service;
-        match retrieval.list_files_owned(folder_id, auth_user.id).await {
+        match retrieval
+            .list_files_with_perms(folder_id, auth_user.id)
+            .await
+        {
             Ok(files) => {
                 // Compute lightweight ETag from max modified_at + count
                 let max_mod = files.iter().map(|f| f.modified_at).max().unwrap_or(0);
@@ -751,64 +774,16 @@ impl FileHandler {
     /// Delegates to [`Self::upload_file_inner`] and, on success, spawns
     /// a background task to generate all thumbnail sizes before serialising
     /// the `FileDto` once.
+    /// TODO: should move thumbnail generation to a generic hook ? (onfileUploaded, other services will beneficiate it)
     pub(super) async fn upload_file_with_thumbnails_impl(
         State(state): State<GlobalState>,
         auth_user: AuthUser,
         multipart: Multipart,
     ) -> impl IntoResponse {
-        let (file, blob_hash) = match Self::upload_file_inner(&state, &auth_user, multipart).await {
+        let (file, _) = match Self::upload_file_inner(&state, &auth_user, multipart).await {
             Ok(pair) => pair,
             Err(response) => return response.into_response(),
         };
-
-        // Generate thumbnails for supported images in background.
-        // The blob_hash was already computed during the hash-on-write spool,
-        // so we can reconstruct the source bytes directly from DedupService
-        // without an extra DB round-trip.
-        if state
-            .core
-            .thumbnail_service
-            .is_supported_image(&file.mime_type)
-        {
-            let file_id = file.id.clone();
-            let thumbnail_service = state.core.thumbnail_service.clone();
-            let dedup_service = state.core.dedup_service.clone();
-            let blob_hash_owned = blob_hash.clone();
-
-            tokio::spawn(async move {
-                tracing::info!("🖼️ Generating thumbnails for: {}", file_id);
-                match dedup_service.read_blob_bytes(&blob_hash_owned).await {
-                    Ok(original_bytes) => {
-                        thumbnail_service.generate_all_sizes_background_from_bytes(
-                            file_id,
-                            blob_hash_owned,
-                            original_bytes,
-                            dedup_service.clone(),
-                        );
-                    }
-                    Err(err) => {
-                        tracing::warn!(
-                            "Failed to load source image for thumbnail generation {}: {}",
-                            file_id,
-                            err
-                        );
-                    }
-                }
-            });
-        }
-
-        // Extract audio metadata for supported audio files in background.
-        if let Some(ref audio_service) = state.applications.audio_metadata_service
-            && AudioMetadataService::is_audio_file(&file.mime_type)
-            && let Ok(file_id) = uuid::Uuid::parse_str(&file.id)
-        {
-            let file_path = state.core.dedup_service.blob_path(&blob_hash);
-            AudioMetadataService::spawn_extraction_background(
-                audio_service.clone(),
-                file_id,
-                file_path,
-            );
-        }
 
         Self::created_json_response(&file).into_response()
     }
@@ -825,15 +800,14 @@ impl FileHandler {
         auth_user: AuthUser,
         Path(file_id): Path<String>,
     ) -> impl IntoResponse {
-        // Verify ownership
-        let file_read = &state.repositories.file_read_repository;
-        if let Err(e) = file_read.verify_file_owner(&file_id, auth_user.id).await {
-            let msg = e.to_string();
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({ "error": msg })),
-            )
-                .into_response();
+        // check first that user can access this resource
+        if let Err(err) = state
+            .applications
+            .file_management_service
+            .require_permission(auth_user.id, Permission::Read, &file_id)
+            .await
+        {
+            return AppError::from(err).into_response();
         }
 
         let metadata_repo = &state.repositories.file_metadata_repository;
@@ -875,7 +849,7 @@ impl FileHandler {
 
         // Auth required: trash-first with dedup cleanup + ownership verification
         let result = mgmt
-            .delete_with_cleanup(&id, auth_user.id)
+            .delete_and_cleanup_with_perms(&id, auth_user.id)
             .await
             .map(|was_trashed| {
                 if was_trashed {
@@ -917,13 +891,17 @@ impl FileHandler {
 
         tracing::info!("Renaming file {} to \"{}\"", id, new_name);
         let mgmt = &state.applications.file_management_service;
-        match mgmt.rename_file_owned(&id, auth_user.id, &new_name).await {
+        match mgmt
+            .rename_file_with_perms(&id, auth_user.id, &new_name)
+            .await
+        {
             Ok(file_dto) => (StatusCode::OK, Json(file_dto)).into_response(),
             Err(err) => AppError::from(err).into_response(),
         }
     }
 
     /// Moves a file to a different folder (ownership-verified)
+    /// TODO: dead function ?
     pub async fn move_file(
         State(state): State<GlobalState>,
         auth_user: AuthUser,
@@ -935,7 +913,7 @@ impl FileHandler {
         let mgmt = &state.applications.file_management_service;
 
         match mgmt
-            .move_file_owned(&id, auth_user.id, payload.folder_id)
+            .move_file_with_perms(&id, auth_user.id, payload.folder_id)
             .await
         {
             Ok(file) => (StatusCode::OK, Json(file)).into_response(),
@@ -956,7 +934,10 @@ impl FileHandler {
             .map(|s| s.to_string());
 
         let mgmt = &state.applications.file_management_service;
-        match mgmt.move_file_owned(&id, auth_user.id, folder_id).await {
+        match mgmt
+            .move_file_with_perms(&id, auth_user.id, folder_id)
+            .await
+        {
             Ok(file_dto) => (StatusCode::OK, Json(file_dto)).into_response(),
             Err(err) => AppError::from(err).into_response(),
         }

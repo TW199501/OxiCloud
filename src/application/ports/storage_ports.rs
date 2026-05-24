@@ -29,6 +29,8 @@ pub trait FileReadPort: Send + Sync + 'static {
     /// Gets a file by its ID.
     async fn get_file(&self, id: &str) -> Result<File, DomainError>;
 
+    async fn get_file_or_trashed(&self, id: &str) -> Result<File, DomainError>;
+
     /// Gets a file by its ID, scoped to a specific owner.
     ///
     /// Returns `NotFound` if the file does not exist **or** belongs to a

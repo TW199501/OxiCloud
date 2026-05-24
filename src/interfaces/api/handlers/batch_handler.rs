@@ -15,6 +15,7 @@ use crate::application::services::batch_operations::{
 };
 use crate::interfaces::api::deserializer;
 use crate::interfaces::api::handlers::ApiResult;
+use crate::interfaces::errors::AppError;
 use crate::interfaces::middleware::auth::AuthUser;
 
 /// Maximum number of items allowed in a single batch request.
@@ -1010,10 +1011,19 @@ async fn process_download_batch(
         .await
         .map_err(|e| {
             tracing::error!("Batch download ZIP failed: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Batch download failed".to_string(),
-            )
+            // Surface DomainError variants (NotFound when no items were
+            // authorized) with their natural HTTP status code instead of
+            // collapsing everything to 500.
+            match e {
+                crate::application::services::batch_operations::BatchOperationError::Domain(de) => {
+                    let app: AppError = de.into();
+                    (app.status_code, app.message)
+                }
+                other => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Batch download failed: {}", other),
+                ),
+            }
         })?;
 
     // Read file size for Content-Length before splitting ownership

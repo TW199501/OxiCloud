@@ -561,6 +561,7 @@ fn share_browse_error_response(err: crate::common::errors::DomainError) -> Respo
     AppError::from(err).into_response()
 }
 
+// TODO: remove this and use the classic /api/files & /api/folders get, but with the token as session ?
 #[utoipa::path(
     get,
     path = "/api/s/{token}/contents",

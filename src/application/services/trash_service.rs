@@ -6,19 +6,22 @@ use crate::application::dtos::display_helpers::{
     category_for, icon_class_for, icon_special_class_for,
 };
 use crate::application::dtos::trash_dto::TrashedItemDto;
+use crate::application::ports::authorization_ports::AuthorizationEngine;
+use crate::application::ports::file_lifecycle::FileLifecycleHook;
 use crate::application::ports::storage_ports::{FileReadPort, FileWritePort};
 use crate::application::ports::trash_ports::TrashUseCase;
 use crate::common::errors::{DomainError, ErrorKind, Result};
 use crate::domain::entities::trashed_item::{TrashedItem, TrashedItemType};
 use crate::domain::repositories::folder_repository::FolderRepository;
 use crate::domain::repositories::trash_repository::TrashRepository;
+use crate::domain::services::authorization::{Permission, Resource, Subject};
 use crate::infrastructure::repositories::pg::file_blob_read_repository::FileBlobReadRepository;
 use crate::infrastructure::repositories::pg::file_blob_write_repository::FileBlobWriteRepository;
 use crate::infrastructure::repositories::pg::folder_db_repository::FolderDbRepository;
 use crate::infrastructure::repositories::pg::trash_db_repository::TrashDbRepository;
 use crate::infrastructure::services::dedup_service::DedupService;
 use crate::infrastructure::services::file_content_cache::FileContentCache;
-use crate::infrastructure::services::thumbnail_service::ThumbnailService;
+use crate::infrastructure::services::pg_acl_engine::PgAclEngine;
 
 /**
  * Application service for trash operations.
@@ -50,11 +53,14 @@ pub struct TrashService {
     /// orphaned blob files and thumbnails that the PG trigger cannot reach.
     dedup_service: Arc<DedupService>,
 
-    /// Thumbnail service for cleaning up thumbnails on permanent delete
-    thumbnail_service: Option<Arc<ThumbnailService>>,
+    /// Lifecycle hook dispatcher — fired on file permanently deleted.
+    file_deleted_hook: Option<Arc<dyn FileLifecycleHook>>,
 
     /// Content cache — invalidated when files are permanently deleted from trash.
     content_cache: Option<Arc<FileContentCache>>,
+
+    /// Authz engine
+    authz: Arc<PgAclEngine>,
 
     /// Number of days items should be kept in trash before automatic cleanup
     retention_days: u32,
@@ -69,8 +75,8 @@ impl TrashService {
         folder_storage_port: Arc<FolderDbRepository>,
         retention_days: u32,
         dedup_service: Arc<DedupService>,
-        thumbnail_service: Option<Arc<ThumbnailService>>,
         content_cache: Option<Arc<FileContentCache>>,
+        authz: Arc<PgAclEngine>,
     ) -> Self {
         Self {
             trash_repository,
@@ -78,10 +84,17 @@ impl TrashService {
             file_write_port,
             folder_storage_port,
             dedup_service,
-            thumbnail_service,
+            file_deleted_hook: None,
             content_cache,
+            authz,
             retention_days,
         }
+    }
+
+    /// Sets the lifecycle hook dispatcher (thumbnails, audio metadata, …).
+    pub fn with_file_deleted_hook(mut self, hook: Arc<dyn FileLifecycleHook>) -> Self {
+        self.file_deleted_hook = Some(hook);
+        self
     }
 
     /// Converts a TrashedItem entity to a DTO
@@ -122,46 +135,6 @@ impl TrashService {
             icon_special_class,
         }
     }
-
-    /// Validates that the given user owns the trashed item.
-    /// Returns an error if the item does not exist or belongs to a different user.
-    #[instrument(skip(self))]
-    async fn _validate_user_ownership(&self, item_id: &str, user_id: &str) -> Result<()> {
-        let item_uuid = Uuid::parse_str(item_id)
-            .map_err(|e| DomainError::validation_error(format!("Invalid item ID: {}", e)))?;
-        let user_uuid = Uuid::parse_str(user_id)
-            .map_err(|e| DomainError::validation_error(format!("Invalid user ID: {}", e)))?;
-
-        match self
-            .trash_repository
-            .get_trash_item(&item_uuid, &user_uuid)
-            .await?
-        {
-            Some(item) => {
-                if item.user_id() != user_uuid {
-                    error!(
-                        "User {} attempted to access trash item {} owned by {}",
-                        user_id,
-                        item_id,
-                        item.user_id()
-                    );
-                    return Err(DomainError::access_denied(
-                        "TrashItem",
-                        "You do not have permission to access this trash item",
-                    ));
-                }
-                Ok(())
-            }
-            None => {
-                // Item not found for this user — treat as authorization error
-                // to avoid leaking existence information
-                Err(DomainError::not_found(
-                    "TrashItem",
-                    format!("{} (user: {})", item_id, user_id),
-                ))
-            }
-        }
-    }
 }
 
 impl TrashUseCase for TrashService {
@@ -176,6 +149,7 @@ impl TrashUseCase for TrashService {
         Ok(dtos)
     }
 
+    // TODO: change item_type into Resource enum
     #[instrument(skip(self))]
     async fn move_to_trash(&self, item_id: &str, item_type: &str, user_id: Uuid) -> Result<()> {
         info!(
@@ -209,15 +183,21 @@ impl TrashUseCase for TrashService {
             "file" => {
                 info!("Processing file to move to trash: {}", item_id);
 
-                // Get the file — ownership-verified at SQL level.
-                // Returns NotFound if the file does not exist OR belongs to
-                // another user, preventing cross-user trash operations.
-                debug!("Getting file data (owner-scoped): {}", item_id);
-                let file = match self
-                    .file_read_port
-                    .get_file_for_owner(item_id, user_id)
-                    .await
-                {
+                let file_id = Uuid::parse_str(item_id)
+                    .map_err(|_| DomainError::not_found("File", item_id))?;
+                self.authz
+                    .require(
+                        Subject::User(user_id),
+                        Permission::Delete,
+                        Resource::File(file_id),
+                    )
+                    .await?;
+
+                // Authz already passed — use the non-owner-scoped read so that
+                // grantees with Delete permission can trash files they don't own.
+                // The file's user_id in storage.files is unchanged, so the item
+                // will appear in the original owner's trash view.
+                let file = match self.file_read_port.get_file(item_id).await {
                     Ok(file) => {
                         debug!("File found: {} ({})", file.name(), item_id);
                         file
@@ -235,7 +215,6 @@ impl TrashUseCase for TrashService {
                 let original_path = file.storage_path().to_string();
                 debug!("Original file path: {}", original_path);
 
-                // Create the trash item
                 debug!("Creating TrashedItem object for the file");
                 let trashed_item = TrashedItem::new(
                     item_uuid,
@@ -286,9 +265,17 @@ impl TrashUseCase for TrashService {
                 Ok(())
             }
             "folder" => {
-                // Get the folder and verify ownership.
-                // Returns NotFound if the folder does not exist or belongs
-                // to another user — prevents cross-user trash operations.
+                // check deletion permition
+                let folder_id = Uuid::parse_str(item_id)
+                    .map_err(|_| DomainError::not_found("Folder", item_id))?;
+                self.authz
+                    .require(
+                        Subject::User(user_id),
+                        Permission::Delete,
+                        Resource::Folder(folder_id),
+                    )
+                    .await?;
+
                 let folder = self
                     .folder_storage_port
                     .get_folder(item_id)
@@ -301,18 +288,8 @@ impl TrashUseCase for TrashService {
                         )
                     })?;
 
-                // Ownership check — return NotFound (not Forbidden) to
-                // prevent leaking whether the folder exists.
-                if folder.owner_id() != Some(user_id) {
-                    return Err(DomainError::not_found(
-                        "Folder",
-                        format!("Folder not found: {}", item_id),
-                    ));
-                }
-
                 let original_path = folder.storage_path().to_string();
 
-                // Create the trash item
                 let trashed_item = TrashedItem::new(
                     item_uuid,
                     user_uuid,
@@ -605,12 +582,8 @@ impl TrashUseCase for TrashService {
                             }
                         }
 
-                        // Best-effort thumbnail cleanup — thumbnails are cache
-                        // artifacts, so failure must not block file deletion.
-                        if let Some(thumb) = &self.thumbnail_service
-                            && let Err(e) = thumb.delete_thumbnails(&file_id).await
-                        {
-                            warn!("Failed to delete thumbnails for file {}: {}", file_id, e);
+                        if let Some(hook) = &self.file_deleted_hook {
+                            hook.on_file_deleted(&file_id);
                         }
                     }
                     TrashedItemType::Folder => {
@@ -702,18 +675,20 @@ impl TrashUseCase for TrashService {
     async fn empty_trash(&self, user_id: Uuid) -> Result<()> {
         info!("Emptying trash for user {}", user_id);
 
-        // Collect trashed file IDs BEFORE bulk-deleting so we can clean up
-        // their thumbnails afterward.  This is best-effort — if the query
-        // fails we still proceed with the bulk delete.
-        let trashed_file_ids: Vec<String> = if self.thumbnail_service.is_some() {
-            match self.trash_repository.get_trash_items(&user_id).await {
-                Ok(items) => items
-                    .iter()
-                    .filter(|i| matches!(i.item_type(), TrashedItemType::File))
-                    .map(|i| i.original_id().to_string())
-                    .collect(),
+        // Collect ALL trashed file IDs BEFORE bulk-deleting so hooks (thumbnail
+        // cleanup, etc.) can run afterward.  We use get_all_trashed_file_ids (not
+        // get_trash_items) because the trash_items view excludes files inside a
+        // trashed folder — those files will still be deleted by clear_trash via
+        // the folder CASCADE, but their hooks would otherwise be missed.
+        let trashed_file_ids: Vec<String> = if self.file_deleted_hook.is_some() {
+            match self
+                .trash_repository
+                .get_all_trashed_file_ids(&user_id)
+                .await
+            {
+                Ok(ids) => ids,
                 Err(e) => {
-                    warn!("Could not list trashed items for thumbnail cleanup: {}", e);
+                    warn!("Could not list trashed files for hook cleanup: {}", e);
                     Vec::new()
                 }
             }
@@ -746,12 +721,9 @@ impl TrashUseCase for TrashService {
             }
         }
 
-        // Best-effort thumbnail cleanup for all deleted files
-        if let Some(thumb) = &self.thumbnail_service {
+        if let Some(hook) = &self.file_deleted_hook {
             for file_id in &trashed_file_ids {
-                if let Err(e) = thumb.delete_thumbnails(file_id).await {
-                    warn!("Failed to delete thumbnails for file {}: {}", file_id, e);
-                }
+                hook.on_file_deleted(file_id);
             }
         }
 

@@ -401,7 +401,7 @@ async fn authorize_wopi_access<S: FileRetrievalUseCase>(
     requested_action: &str,
 ) -> Result<(crate::application::dtos::file_dto::FileDto, bool), StatusCode> {
     let file = file_retrieval
-        .get_file_owned(file_id, caller_id)
+        .get_file_with_perms(file_id, caller_id)
         .await
         .map_err(|_| StatusCode::NOT_FOUND)?;
     // Owner verified — grant write unless explicitly requesting view-only.

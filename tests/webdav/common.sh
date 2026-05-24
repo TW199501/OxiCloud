@@ -1,6 +1,9 @@
 #!/bin/bash
 
-source test.env
+if [ -z "$base_url" ]
+then
+    source test.env
+fi
 
 err() {
     echo "$*" >&2
@@ -32,7 +35,10 @@ oxicloud_setup() {
 # returns TOKEN variable
 oxicloud_login() {
 
-    oxicloud_setup
+    if [[ ( $# -eq 0 ) || ( "$1" != "no-create" )  ]]
+    then
+        oxicloud_setup
+    fi
 
     LOGIN_DATA='{"username":"'$username'","password":"'$password'"}'
 

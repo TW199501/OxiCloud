@@ -60,6 +60,14 @@ impl FileReadPort for MockFileReadPort {
             .ok_or_else(|| DomainError::not_found("File", id.to_string()))
     }
 
+    async fn get_file_or_trashed(&self, id: &str) -> Result<File, DomainError> {
+        let files = self.files.lock().unwrap();
+        files
+            .get(id)
+            .map(|(f, _)| f.clone())
+            .ok_or_else(|| DomainError::not_found("File", id.to_string()))
+    }
+
     async fn get_file_for_owner(&self, id: &str, owner_id: Uuid) -> Result<File, DomainError> {
         let files = self.files.lock().unwrap();
         match files.get(id) {
@@ -362,7 +370,7 @@ async fn stub_move_file_owned_returns_ok() {
     let user_id = Uuid::new_v4();
     let stub = StubFileManagementUseCase;
     let result = stub
-        .move_file_owned("file-1", user_id, Some("folder-2".to_string()))
+        .move_file_with_perms("file-1", user_id, Some("folder-2".to_string()))
         .await;
     assert!(result.is_ok(), "stub should return Ok for move_file_owned");
 }
@@ -372,7 +380,7 @@ async fn stub_rename_file_owned_returns_ok() {
     let user_id = Uuid::new_v4();
     let stub = StubFileManagementUseCase;
     let result = stub
-        .rename_file_owned("file-1", user_id, "new-name.txt")
+        .rename_file_with_perms("file-1", user_id, "new-name.txt")
         .await;
     assert!(
         result.is_ok(),
@@ -387,7 +395,7 @@ use crate::common::stubs::StubFileRetrievalUseCase;
 async fn stub_get_file_owned_returns_ok() {
     let user_id = Uuid::new_v4();
     let stub = StubFileRetrievalUseCase;
-    let result = stub.get_file_owned("file-1", user_id).await;
+    let result = stub.get_file_with_perms("file-1", user_id).await;
     assert!(result.is_ok(), "stub should return Ok for get_file_owned");
 }
 
@@ -396,7 +404,7 @@ async fn stub_get_file_optimized_owned_returns_ok() {
     let user_id = Uuid::new_v4();
     let stub = StubFileRetrievalUseCase;
     let result = stub
-        .get_file_optimized_owned("file-1", user_id, true, false)
+        .get_file_optimized_with_perms("file-1", user_id, true, false)
         .await;
     assert!(
         result.is_ok(),

@@ -782,6 +782,13 @@ mod tests {
             }
         }
 
+        async fn get_file_or_trashed(
+            &self,
+            _id: &str,
+        ) -> Result<crate::domain::entities::file::File, DomainError> {
+            unimplemented!()
+        }
+
         async fn list_files(
             &self,
             _folder_id: Option<&str>,

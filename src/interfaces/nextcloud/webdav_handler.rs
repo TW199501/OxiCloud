@@ -17,11 +17,10 @@ use crate::application::ports::favorites_ports::FavoritesUseCase;
 use crate::application::ports::file_ports::{
     FileManagementUseCase, FileRetrievalUseCase, FileUploadUseCase,
 };
-use crate::application::ports::inbound::FolderUseCase;
+use crate::application::ports::folder_ports::FolderUseCase;
 use crate::application::ports::trash_ports::TrashUseCase;
 use crate::common::di::AppState;
 use crate::common::mime_detect::{filename_from_path, refine_content_type};
-use crate::infrastructure::services::audio_metadata_service::AudioMetadataService;
 use crate::interfaces::errors::AppError;
 use crate::interfaces::middleware::auth::{AuthUser, CurrentUser};
 
@@ -550,22 +549,6 @@ async fn handle_put(
             .await
             .map_err(|e| AppError::internal_error(format!("Failed to update file: {}", e)))?;
 
-        // Update audio metadata for supported audio files.
-        if let Some(ref audio_service) = state.applications.audio_metadata_service
-            && let Ok(file_id) = uuid::Uuid::parse_str(&updated.id)
-        {
-            let file_path = state.core.dedup_service.blob_path(&updated.etag);
-            let is_audio = AudioMetadataService::is_audio_file(&content_type);
-
-            if is_audio {
-                AudioMetadataService::spawn_extraction_with_delete_background(
-                    audio_service.clone(),
-                    file_id,
-                    file_path,
-                );
-            }
-        }
-
         return Ok(Response::builder()
             .status(StatusCode::NO_CONTENT)
             .header(header::ETAG, format!("\"{}\"", updated.etag))
@@ -586,19 +569,6 @@ async fn handle_put(
         .create_file(&parent_internal, filename, &body_bytes, &content_type)
         .await
         .map_err(|e| AppError::internal_error(format!("Failed to create file: {}", e)))?;
-
-    // Extract audio metadata for supported audio files in background.
-    if let Some(ref audio_service) = state.applications.audio_metadata_service
-        && AudioMetadataService::is_audio_file(&file_dto.mime_type)
-        && let Ok(file_id) = uuid::Uuid::parse_str(&file_dto.id)
-    {
-        let file_path = state.core.dedup_service.blob_path(&file_dto.etag);
-        AudioMetadataService::spawn_extraction_background(
-            audio_service.clone(),
-            file_id,
-            file_path,
-        );
-    }
 
     let builder = Response::builder()
         .status(StatusCode::CREATED)
@@ -655,7 +625,7 @@ async fn handle_mkcol(
                     name: segment.to_string(),
                     parent_id: Some(parent_id.clone()),
                 };
-                match folder_service.create_folder(dto).await {
+                match folder_service.create_folder_with_perms(dto, user.id).await {
                     Ok(created) => {
                         parent_id = created.id.clone();
                     }
@@ -731,7 +701,7 @@ async fn handle_delete(
 
     if let Ok(folder) = folder_service.get_folder_by_path(&internal_path).await {
         folder_service
-            .delete_folder(&folder.id, user.id)
+            .delete_folder_with_perms(&folder.id, user.id)
             .await
             .map_err(|e| AppError::internal_error(format!("Failed to delete folder: {}", e)))?;
 
@@ -743,7 +713,7 @@ async fn handle_delete(
 
     if let Ok(file) = file_service.get_file_by_path(&internal_path).await {
         file_mgmt
-            .delete_file(&file.id)
+            .delete_file_with_perms(&file.id, user.id)
             .await
             .map_err(|e| AppError::internal_error(format!("Failed to delete file: {}", e)))?;
 
@@ -797,7 +767,7 @@ async fn handle_move(
         if src_parent_sub == dest_parent_sub {
             // Same parent → rename.
             file_mgmt
-                .rename_file(&file.id, dest_name)
+                .rename_file_with_perms(&file.id, user.id, dest_name)
                 .await
                 .map_err(|e| AppError::internal_error(format!("Rename failed: {}", e)))?;
         } else {
@@ -808,14 +778,14 @@ async fn handle_move(
                 .map_err(|_| AppError::not_found("Destination folder not found"))?;
 
             file_mgmt
-                .move_file(&file.id, Some(dest_parent.id.clone()))
+                .move_file_with_perms(&file.id, user.id, Some(dest_parent.id.clone()))
                 .await
                 .map_err(|e| AppError::internal_error(format!("Move failed: {}", e)))?;
 
             // If the filename changed too, rename after move.
             if file.name != dest_name {
                 file_mgmt
-                    .rename_file(&file.id, dest_name)
+                    .rename_file_with_perms(&file.id, user.id, dest_name)
                     .await
                     .map_err(|e| AppError::internal_error(format!("Rename failed: {}", e)))?;
             }
@@ -850,7 +820,7 @@ async fn handle_move(
             // Same parent → rename.
             use crate::application::dtos::folder_dto::RenameFolderDto;
             folder_service
-                .rename_folder(
+                .rename_folder_with_perms(
                     &folder.id,
                     RenameFolderDto {
                         name: dest_name.to_string(),
@@ -868,7 +838,7 @@ async fn handle_move(
 
             use crate::application::dtos::folder_dto::MoveFolderDto;
             folder_service
-                .move_folder(
+                .move_folder_with_perms(
                     &folder.id,
                     MoveFolderDto {
                         parent_id: Some(dest_parent.id.clone()),
@@ -882,7 +852,7 @@ async fn handle_move(
             if folder.name != dest_name {
                 use crate::application::dtos::folder_dto::RenameFolderDto;
                 folder_service
-                    .rename_folder(
+                    .rename_folder_with_perms(
                         &folder.id,
                         RenameFolderDto {
                             name: dest_name.to_string(),

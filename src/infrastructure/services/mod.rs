@@ -19,6 +19,7 @@ pub mod oidc_service;
 pub mod password_hasher;
 pub mod path_resolver_service;
 pub mod path_service;
+pub mod pg_acl_engine;
 pub mod retry_blob_backend;
 pub mod s3_blob_backend;
 pub mod share_unlock_cookie;

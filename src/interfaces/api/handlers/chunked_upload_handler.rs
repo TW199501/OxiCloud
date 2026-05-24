@@ -21,8 +21,10 @@ use utoipa::ToSchema;
 use crate::application::ports::chunked_upload_ports::ChunkedUploadPort;
 use crate::application::ports::chunked_upload_ports::DEFAULT_CHUNK_SIZE;
 use crate::application::ports::file_ports::FileUploadUseCase;
+use crate::application::ports::folder_ports::FolderUseCase;
 use crate::application::ports::storage_ports::StorageUsagePort;
 use crate::common::di::AppState;
+use crate::domain::services::authorization::Permission;
 use crate::interfaces::errors::AppError;
 use crate::interfaces::middleware::auth::AuthUser;
 
@@ -116,6 +118,27 @@ impl ChunkedUploadHandler {
                 })),
             )
                 .into_response();
+        }
+
+        // ── Permission pre-check: caller must have Create on the target
+        // folder BEFORE we allocate a session and accept chunks. The
+        // upload service re-checks at finalize time, but failing here
+        // avoids wasting client+server resources on chunks that will be
+        // rejected. None = caller's root namespace, no check needed.
+        if let Some(ref fid) = request.folder_id
+            && let Err(err) = state
+                .applications
+                .folder_service_concrete
+                .require_permission(auth_user.id, Permission::Create, fid)
+                .await
+        {
+            tracing::warn!(
+                "⛔ CHUNKED UPLOAD REJECTED (no perm): user='{}' folder='{}' err='{}'",
+                auth_user.username,
+                fid,
+                err
+            );
+            return AppError::from(err).into_response();
         }
 
         // ── Quota enforcement ────────────────────────────────────
@@ -264,6 +287,7 @@ impl ChunkedUploadHandler {
     /// POST /api/uploads/:upload_id/complete - Finalize upload
     ///
     /// Assembles all chunks into the final file and creates the file record
+    // TODO: how is implemented security (owneship, permission ?)
     pub(super) async fn complete_upload_impl(
         State(state): State<Arc<AppState>>,
         auth_user: AuthUser,
@@ -349,9 +373,7 @@ impl ChunkedUploadHandler {
             .await
         {
             Ok(_) => StatusCode::NO_CONTENT.into_response(),
-            Err(e) => {
-                AppError::internal_error(format!("Failed to cancel upload: {}", e)).into_response()
-            }
+            Err(e) => AppError::from(e).into_response(),
         }
     }
 }

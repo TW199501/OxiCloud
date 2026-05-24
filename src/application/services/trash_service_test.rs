@@ -402,6 +402,11 @@ impl TrashRepository for MockTrashRepository {
         Ok(())
     }
 
+    async fn get_all_trashed_file_ids(&self, _user_id: &Uuid) -> Result<Vec<String>> {
+        let files = self.trashed_files.lock().unwrap();
+        Ok(files.keys().cloned().collect())
+    }
+
     async fn delete_expired_bulk(&self) -> Result<(u64, u64)> {
         let mut items = self.trash_items.lock().unwrap();
         let now = Utc::now();
@@ -454,6 +459,14 @@ impl FileReadPort for MockFileRepository {
         }
     }
 
+    async fn get_file_or_trashed(&self, id: &str) -> std::prelude::v1::Result<File, DomainError> {
+        let files = self.files.lock().unwrap();
+        if let Some(file) = files.get(id) {
+            Ok(file.clone())
+        } else {
+            Err(DomainError::not_found("File", id.to_string()))
+        }
+    }
     async fn list_files(
         &self,
         _folder_id: Option<&str>,

@@ -119,6 +119,12 @@ Never duplicate logic across handlers or services. If the same behaviour is need
 - Reusable infrastructure behaviour → method on the relevant service struct
 - Shared port behaviour → default method on the trait
 
+### Authorization (AuthZ)
+
+**AuthZ is enforced exclusively in the application service layer, never in handlers.** All permission checks go through `AuthorizationEngine` (port: `application/ports/authorization_ports.rs`) via service methods named with the `_with_perms` suffix. HTTP handlers (REST, WebDAV, NextCloud, CalDAV, CardDAV) authenticate the caller and pass `caller_id` into the service — they MUST NOT perform their own ownership/permission checks. The authentication middleware extracts the caller; the service decides if the action is allowed.
+
+This rule prevents drift between layers and ensures every code path goes through the same policy. New service methods that touch a user-scoped resource must take `caller_id: Uuid` and call `authz.require(...)` before any read or mutation.
+
 # Frontend part
 
 ## Code conventions
@@ -130,6 +136,7 @@ Never duplicate logic across handlers or services. If the same behaviour is need
 - Naming: `camelCase` for variables/functions, `PascalCase` for classes
 - No `var` — use `const`/`let` only
 - **JSDoc required** on all public functions — `jsconfig.json` enables `checkJs` globally (equivalent to `@ts-check` on every file)
+- Always us static/js/core/types.js to mapp OxCcloud API structure
 - Type parameters, return types, and complex types via `@typedef`:
 
 ```js
@@ -161,6 +168,17 @@ Never duplicate logic across JS modules. If the same behaviour is needed in more
 - Mobile-first: media queries expand, they don't restrict
 - One CSS file per logical component in `/static/css/`
 - [data-theme="dark"] is permitted only in /static/css/themes/dark.css
+
+## Frontend Pre-commit checks
+
+Always run these before committing, in this order:
+
+```bash
+biome check --fix                                           # Auto-format
+biome lint  --fix                                           # Lint (must pass)
+stylelint static/css/                                       # Css rules
+tsc -p jsconfig.json --noEmit                               # Ensure JS is always typed
+```
 
 # What Claude must NOT do
 - Edit `Cargo.lock` directly

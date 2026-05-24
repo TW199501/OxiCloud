@@ -6,14 +6,24 @@ import { escapeHtml, formatDateTime } from '../core/formatters.js';
 import { i18n } from '../core/i18n.js';
 import { fileOps } from '../features/files/fileOperations.js';
 import { multiSelect } from '../features/files/multiSelect.js';
+import * as pathTooltip from '../features/pathTooltip.js';
 import { appElements } from './state.js';
 import { ui } from './ui.js';
+
+/** Categories whose items have a server-side thumbnail. */
+const THUMBNAILABLE = new Set(['image', 'video', 'pdf']);
+
+/**
+ *
+ * @import {TrashItem} from '../core/types.js'
+ */
 
 async function loadTrashItems() {
     const elements = appElements;
 
     try {
         if (multiSelect) multiSelect.clear();
+        pathTooltip.destroy(elements.filesList);
         ui.resetFilesList(); // ensure also list visible & error hidden
         elements.filesList.innerHTML = `
             <div class="list-header trash-header">
@@ -25,7 +35,7 @@ async function loadTrashItems() {
             </div>
         `;
 
-        ui.updateBreadcrumb('');
+        ui.updateBreadcrumb();
 
         const trashItems = await fileOps.getTrashItems();
 
@@ -40,12 +50,17 @@ async function loadTrashItems() {
         trashItems.forEach((item) => {
             addTrashItemToView(item);
         });
+        pathTooltip.init(elements.filesList);
     } catch (error) {
         console.error('Error loading trash items:', error);
         ui.showNotification('Error', 'Error loading trash items');
     }
 }
 
+/**
+ *
+ * @param {TrashItem} item
+ */
 function addTrashItemToView(item) {
     const elements = appElements;
     const isFile = item.item_type === 'file';
@@ -67,17 +82,20 @@ function addTrashItemToView(item) {
 
     const isFolder = !isFile;
     const iconWrapClass = isFolder ? 'file-icon folder-icon' : `file-icon ${iconSpecialClass}`.trim();
+    const canThumbnail = isFile && THUMBNAILABLE.has((item.category || '').toLowerCase());
 
     const listElement = document.createElement('div');
     listElement.className = 'file-item trash-item';
     listElement.dataset.trashId = item.id;
     listElement.dataset.originalId = item.original_id;
     listElement.dataset.itemType = item.item_type;
+    if (item.original_path) listElement.dataset.path = item.original_path;
 
     listElement.innerHTML = `
         <div class="name-cell">
             <div class="${iconWrapClass}">
                 <i class="${iconClass}"></i>
+                ${canThumbnail ? `<img class="file-thumb" src="/api/files/${item.original_id}/thumbnail/icon" loading="lazy" alt="">` : ''}
             </div>
             <span>${escapeHtml(item.name)}</span>
         </div>

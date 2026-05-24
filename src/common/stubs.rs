@@ -25,13 +25,16 @@ use crate::application::dtos::search_dto::{
 use crate::application::ports::file_ports::{
     FileManagementUseCase, FileRetrievalUseCase, FileUploadUseCase, OptimizedFileContent,
 };
-use crate::application::ports::inbound::{FolderUseCase, SearchUseCase};
+use crate::application::ports::folder_ports::FolderUseCase;
+
+use crate::application::ports::inbound::SearchUseCase;
 use crate::application::ports::storage_ports::{FileReadPort, FileWritePort};
 use crate::application::ports::zip_ports::ZipPort;
 use crate::common::errors::DomainError;
 use crate::domain::entities::file::File;
 use crate::domain::entities::folder::Folder;
 use crate::domain::repositories::folder_repository::FolderRepository;
+use crate::domain::services::authorization::Permission;
 use crate::domain::services::i18n_service::{I18nResult, I18nService, Locale};
 use crate::domain::services::path_service::StoragePath;
 
@@ -64,6 +67,10 @@ pub struct StubFileReadPort;
 
 impl FileReadPort for StubFileReadPort {
     async fn get_file(&self, _id: &str) -> Result<File, DomainError> {
+        Ok(File::default())
+    }
+
+    async fn get_file_or_trashed(&self, _id: &str) -> Result<File, DomainError> {
         Ok(File::default())
     }
 
@@ -353,7 +360,20 @@ impl I18nService for StubI18nService {
 pub struct StubFolderUseCase;
 
 impl FolderUseCase for StubFolderUseCase {
-    async fn create_folder(&self, _dto: CreateFolderDto) -> Result<FolderDto, DomainError> {
+    async fn require_permission(
+        &self,
+        _caller_id: Uuid,
+        _permission: Permission,
+        _file_id: &str,
+    ) -> Result<(), DomainError> {
+        Ok(())
+    }
+
+    async fn create_folder_with_perms(
+        &self,
+        _dto: CreateFolderDto,
+        _user_id: Uuid,
+    ) -> Result<FolderDto, DomainError> {
         Ok(FolderDto::default())
     }
 
@@ -361,7 +381,7 @@ impl FolderUseCase for StubFolderUseCase {
         Ok(FolderDto::default())
     }
 
-    async fn get_folder_owned(
+    async fn get_folder_with_perms(
         &self,
         _id: &str,
         _caller_id: Uuid,
@@ -377,7 +397,7 @@ impl FolderUseCase for StubFolderUseCase {
         Ok(Vec::new())
     }
 
-    async fn list_folders_for_owner(
+    async fn list_folders_with_perms(
         &self,
         _parent_id: Option<&str>,
         _owner_id: Uuid,
@@ -393,7 +413,7 @@ impl FolderUseCase for StubFolderUseCase {
         Ok(PaginatedResponseDto::new(Vec::new(), 0, 10, 0))
     }
 
-    async fn list_folders_for_owner_paginated(
+    async fn list_folders_paginated_with_perms(
         &self,
         _parent_id: Option<&str>,
         _owner_id: Uuid,
@@ -402,7 +422,7 @@ impl FolderUseCase for StubFolderUseCase {
         Ok(PaginatedResponseDto::new(Vec::new(), 0, 10, 0))
     }
 
-    async fn rename_folder(
+    async fn rename_folder_with_perms(
         &self,
         _id: &str,
         _dto: RenameFolderDto,
@@ -411,7 +431,7 @@ impl FolderUseCase for StubFolderUseCase {
         Ok(FolderDto::default())
     }
 
-    async fn move_folder(
+    async fn move_folder_with_perms(
         &self,
         _id: &str,
         _dto: MoveFolderDto,
@@ -420,7 +440,11 @@ impl FolderUseCase for StubFolderUseCase {
         Ok(FolderDto::default())
     }
 
-    async fn delete_folder(&self, _id: &str, _caller_id: Uuid) -> Result<(), DomainError> {
+    async fn delete_folder_with_perms(
+        &self,
+        _id: &str,
+        _caller_id: Uuid,
+    ) -> Result<(), DomainError> {
         Ok(())
     }
 
@@ -507,11 +531,19 @@ impl FileRetrievalUseCase for StubFileRetrievalUseCase {
         Ok(FileDto::default())
     }
 
+    async fn get_file_or_trashed_with_perms(
+        &self,
+        _id: &str,
+        _owner_id: Uuid,
+    ) -> Result<FileDto, DomainError> {
+        Ok(FileDto::default())
+    }
+
     async fn list_files(&self, _folder_id: Option<&str>) -> Result<Vec<FileDto>, DomainError> {
         Ok(Vec::new())
     }
 
-    async fn list_files_owned(
+    async fn list_files_with_perms(
         &self,
         _folder_id: Option<&str>,
         _owner_id: Uuid,
@@ -527,7 +559,7 @@ impl FileRetrievalUseCase for StubFileRetrievalUseCase {
         Ok(Box::new(empty_stream))
     }
 
-    async fn get_file_stream_owned(
+    async fn get_file_stream_with_perms(
         &self,
         _id: &str,
         _caller_id: Uuid,
@@ -573,11 +605,15 @@ impl FileRetrievalUseCase for StubFileRetrievalUseCase {
         Ok(Box::pin(futures::stream::empty()))
     }
 
-    async fn get_file_owned(&self, _id: &str, _caller_id: Uuid) -> Result<FileDto, DomainError> {
+    async fn get_file_with_perms(
+        &self,
+        _id: &str,
+        _caller_id: Uuid,
+    ) -> Result<FileDto, DomainError> {
         Ok(FileDto::default())
     }
 
-    async fn get_file_optimized_owned(
+    async fn get_file_optimized_with_perms(
         &self,
         _id: &str,
         _caller_id: Uuid,
@@ -594,7 +630,7 @@ impl FileRetrievalUseCase for StubFileRetrievalUseCase {
         ))
     }
 
-    async fn get_file_range_stream_owned(
+    async fn get_file_range_stream_with_perms(
         &self,
         _id: &str,
         _caller_id: Uuid,
@@ -613,23 +649,16 @@ impl FileRetrievalUseCase for StubFileRetrievalUseCase {
 pub struct StubFileManagementUseCase;
 
 impl FileManagementUseCase for StubFileManagementUseCase {
-    async fn move_file(
+    async fn require_permission(
         &self,
+        _caller_id: Uuid,
+        _permission: Permission,
         _file_id: &str,
-        _folder_id: Option<String>,
-    ) -> Result<FileDto, DomainError> {
-        Ok(FileDto::default())
+    ) -> Result<(), DomainError> {
+        Ok(())
     }
 
-    async fn copy_file(
-        &self,
-        _file_id: &str,
-        _folder_id: Option<String>,
-    ) -> Result<FileDto, DomainError> {
-        Ok(FileDto::default())
-    }
-
-    async fn copy_file_owned(
+    async fn copy_file_with_perms(
         &self,
         _file_id: &str,
         _caller_id: Uuid,
@@ -638,23 +667,19 @@ impl FileManagementUseCase for StubFileManagementUseCase {
         Ok(FileDto::default())
     }
 
-    async fn rename_file(&self, _file_id: &str, _new_name: &str) -> Result<FileDto, DomainError> {
-        Ok(FileDto::default())
-    }
-
-    async fn delete_file(&self, _id: &str) -> Result<(), DomainError> {
+    async fn delete_file_with_perms(&self, _id: &str, _caller_id: Uuid) -> Result<(), DomainError> {
         Ok(())
     }
 
-    async fn delete_file_owned(&self, _id: &str, _caller_id: Uuid) -> Result<(), DomainError> {
-        Ok(())
-    }
-
-    async fn delete_with_cleanup(&self, _id: &str, _user_id: Uuid) -> Result<bool, DomainError> {
+    async fn delete_and_cleanup_with_perms(
+        &self,
+        _id: &str,
+        _user_id: Uuid,
+    ) -> Result<bool, DomainError> {
         Ok(false)
     }
 
-    async fn move_file_owned(
+    async fn move_file_with_perms(
         &self,
         _file_id: &str,
         _caller_id: Uuid,
@@ -663,7 +688,7 @@ impl FileManagementUseCase for StubFileManagementUseCase {
         Ok(FileDto::default())
     }
 
-    async fn rename_file_owned(
+    async fn rename_file_with_perms(
         &self,
         _file_id: &str,
         _caller_id: Uuid,
@@ -672,7 +697,7 @@ impl FileManagementUseCase for StubFileManagementUseCase {
         Ok(FileDto::default())
     }
 
-    async fn copy_folder_tree_owned(
+    async fn copy_folder_tree_with_perms(
         &self,
         _source_folder_id: &str,
         _caller_id: Uuid,

@@ -12,7 +12,7 @@ use tracing::info;
 use crate::application::dtos::file_dto::FileDto;
 use crate::application::dtos::folder_dto::{FolderDto, MoveFolderDto};
 use crate::application::ports::file_ports::{FileManagementUseCase, FileRetrievalUseCase};
-use crate::application::ports::inbound::FolderUseCase;
+use crate::application::ports::folder_ports::FolderUseCase;
 use crate::application::ports::storage_ports::CopyFolderTreeResult;
 use crate::application::ports::trash_ports::TrashUseCase;
 use crate::application::services::file_management_service::FileManagementService;
@@ -145,7 +145,7 @@ impl BatchOperationService {
 
             async move {
                 let copy_result = mgmt
-                    .copy_file_owned(&file_id, user_id, target_folder.map(|s| s.to_string()))
+                    .copy_file_with_perms(&file_id, user_id, target_folder.map(|s| s.to_string()))
                     .await;
                 (file_id, copy_result)
             }
@@ -211,7 +211,7 @@ impl BatchOperationService {
 
             async move {
                 let move_result = mgmt
-                    .move_file_owned(&file_id, user_id, target_folder.map(|s| s.to_string()))
+                    .move_file_with_perms(&file_id, user_id, target_folder.map(|s| s.to_string()))
                     .await;
                 (file_id, move_result)
             }
@@ -270,7 +270,7 @@ impl BatchOperationService {
             let mgmt = self.file_management.clone();
 
             async move {
-                let delete_result = mgmt.delete_file_owned(&file_id, user_id).await;
+                let delete_result = mgmt.delete_file_with_perms(&file_id, user_id).await;
                 let id_for_result = file_id.clone();
                 (file_id, delete_result.map(|_| id_for_result))
             }
@@ -330,7 +330,7 @@ impl BatchOperationService {
             let retrieval = self.file_retrieval.clone();
 
             async move {
-                let get_result = retrieval.get_file_owned(&file_id, user_id).await;
+                let get_result = retrieval.get_file_with_perms(&file_id, user_id).await;
                 (file_id, get_result)
             }
         }))
@@ -390,7 +390,9 @@ impl BatchOperationService {
             let folder_service = self.folder_service.clone();
 
             async move {
-                let delete_result = folder_service.delete_folder(&folder_id, user_id).await;
+                let delete_result = folder_service
+                    .delete_folder_with_perms(&folder_id, user_id)
+                    .await;
                 let id_for_result = folder_id.clone();
                 (folder_id, delete_result.map(|_| id_for_result))
             }
@@ -583,7 +585,9 @@ impl BatchOperationService {
                 let dto = MoveFolderDto {
                     parent_id: target.map(|s| s.to_string()),
                 };
-                let move_result = folder_service.move_folder(&folder_id, dto, user_id).await;
+                let move_result = folder_service
+                    .move_folder_with_perms(&folder_id, dto, user_id)
+                    .await;
                 (folder_id, move_result)
             }
         }))
@@ -644,7 +648,7 @@ impl BatchOperationService {
 
             async move {
                 let copy_result = file_management
-                    .copy_folder_tree_owned(
+                    .copy_folder_tree_with_perms(
                         &folder_id,
                         user_id,
                         target.map(|s| s.to_string()),
@@ -711,15 +715,27 @@ impl BatchOperationService {
         let buf_writer = BufWriter::with_capacity(256 * 1024, tokio_file);
         let mut zip = ZipFileWriter::with_tokio(buf_writer);
 
+        // Track whether any item was authorized + added to the ZIP. If
+        // none were, return NotFound — empty ZIPs are useless and mask
+        // authz failures from the client.
+        let mut items_added: usize = 0;
+
         // ── Add individual files at the root of the ZIP ──────────────────
         for file_id in &file_ids {
-            match self.file_retrieval.get_file_owned(file_id, user_id).await {
+            match self
+                .file_retrieval
+                .get_file_with_perms(file_id, user_id)
+                .await
+            {
                 Ok(file_dto) => {
-                    if let Err(e) = self
+                    match self
                         .add_file_entry_streamed(&mut zip, file_id, &file_dto.name, user_id)
                         .await
                     {
-                        info!("Could not add file {} to ZIP: {}", file_dto.name, e);
+                        Ok(_) => items_added += 1,
+                        Err(e) => {
+                            info!("Could not add file {} to ZIP: {}", file_dto.name, e);
+                        }
                     }
                 }
                 Err(e) => {
@@ -732,21 +748,32 @@ impl BatchOperationService {
         for folder_id in &folder_ids {
             match self
                 .folder_service
-                .get_folder_owned(folder_id, user_id)
+                .get_folder_with_perms(folder_id, user_id)
                 .await
             {
                 Ok(root_folder) => {
-                    if let Err(e) = self
+                    match self
                         .add_folder_subtree_to_zip(&mut zip, folder_id, &root_folder, user_id)
                         .await
                     {
-                        info!("Could not add folder {} to ZIP: {}", root_folder.name, e);
+                        Ok(_) => items_added += 1,
+                        Err(e) => {
+                            info!("Could not add folder {} to ZIP: {}", root_folder.name, e);
+                        }
                     }
                 }
                 Err(e) => {
                     info!("Could not get folder {}: {}", folder_id, e);
                 }
             }
+        }
+
+        // Bail out before finalizing the ZIP if nothing was authorized.
+        if items_added == 0 {
+            return Err(BatchOperationError::Domain(DomainError::not_found(
+                "BatchDownload",
+                "No accessible files or folders in the request",
+            )));
         }
 
         // ── Finalize ─────────────────────────────────────────────────────
@@ -786,7 +813,7 @@ impl BatchOperationService {
 
         let stream = self
             .file_retrieval
-            .get_file_stream_owned(file_id, caller_id)
+            .get_file_stream_with_perms(file_id, caller_id)
             .await
             .map_err(BatchOperationError::Domain)?;
         let mut stream = std::pin::Pin::from(stream);
@@ -975,18 +1002,11 @@ impl BatchOperationService {
             let folder_service = self.folder_service.clone();
 
             async move {
-                // If a parent is specified, verify the caller owns it
-                if let Some(ref pid) = parent_id
-                    && let Err(e) = folder_service.get_folder_owned(pid, user_id).await
-                {
-                    let id = format!("{}:{}", name, pid);
-                    return (id, Err(e));
-                }
                 let dto = crate::application::dtos::folder_dto::CreateFolderDto {
                     name: name.clone(),
                     parent_id: parent_id.clone(),
                 };
-                let create_result = folder_service.create_folder(dto).await;
+                let create_result = folder_service.create_folder_with_perms(dto, user_id).await;
                 let id = format!("{}:{}", name, parent_id.unwrap_or_default());
                 (id, create_result)
             }
@@ -1046,7 +1066,9 @@ impl BatchOperationService {
             let folder_service = self.folder_service.clone();
 
             async move {
-                let get_result = folder_service.get_folder_owned(&folder_id, user_id).await;
+                let get_result = folder_service
+                    .get_folder_with_perms(&folder_id, user_id)
+                    .await;
                 (folder_id, get_result)
             }
         }))

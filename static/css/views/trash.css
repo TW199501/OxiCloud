@@ -43,6 +43,10 @@
     color: var(--color-trash-delete);
 }
 
+.file-item.trash-item > .path-cell {
+    display: none;
+}
+
 .actions-cell {
     display: flex;
     gap: 8px;

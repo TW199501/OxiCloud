@@ -80,6 +80,20 @@ impl FileBlobReadRepository {
         }
     }
 
+    /// Returns the user_id (owner) for a given file ID.
+    /// Mirrors `FolderDbRepository::get_folder_user_id`.
+    /// Used by the AuthorizationEngine for owner short-circuit.
+    pub async fn get_file_user_id(&self, file_id: &str) -> Result<uuid::Uuid, DomainError> {
+        sqlx::query_scalar::<_, uuid::Uuid>("SELECT user_id FROM storage.files WHERE id = $1::uuid")
+            .bind(file_id)
+            .fetch_optional(self.pool.as_ref())
+            .await
+            .map_err(|e| {
+                DomainError::internal_error("FileBlobRead", format!("user_id lookup: {e}"))
+            })?
+            .ok_or_else(|| DomainError::not_found("File", file_id))
+    }
+
     /// Creates a stub instance for testing — never hits PG.
     #[cfg(test)]
     pub fn new_stub() -> Self {
@@ -262,6 +276,49 @@ impl FileReadPort for FileBlobReadRepository {
         // call doesn't need a separate DB round-trip.
         self.hash_cache.insert(id.to_string(), row.8.clone());
 
+        Self::row_to_file(
+            row.0, row.1, row.2, row.3, row.4, row.5, row.6, row.7, row.8, row.9,
+        )
+    }
+
+    /// Like `get_file` but also returns trashed files, gated by owner_id.
+    /// Used exclusively by the thumbnail handler so that thumbnails remain
+    /// accessible while a file is in the trash (before permanent deletion).
+    async fn get_file_or_trashed(&self, id: &str) -> Result<File, DomainError> {
+        let row = sqlx::query_as::<
+            _,
+            (
+                String,
+                String,
+                Option<String>,
+                Option<String>,
+                i64,
+                String,
+                i64,
+                i64,
+                String,
+                Option<Uuid>,
+            ),
+        >(
+            r#"
+            SELECT fi.id::text, fi.name, fi.folder_id::text, fo.path,
+                   fi.size, fi.mime_type,
+                   EXTRACT(EPOCH FROM fi.created_at)::bigint,
+                   EXTRACT(EPOCH FROM fi.updated_at)::bigint,
+                   fi.blob_hash,
+                   fi.user_id
+              FROM storage.files fi
+              LEFT JOIN storage.folders fo ON fo.id = fi.folder_id
+             WHERE fi.id = $1::uuid
+            "#,
+        )
+        .bind(id)
+        .fetch_optional(self.pool.as_ref())
+        .await
+        .map_err(|e| DomainError::internal_error("FileBlobRead", format!("get_trashed: {e}")))?
+        .ok_or_else(|| DomainError::not_found("File", id))?;
+
+        self.hash_cache.insert(id.to_string(), row.8.clone());
         Self::row_to_file(
             row.0, row.1, row.2, row.3, row.4, row.5, row.6, row.7, row.8, row.9,
         )

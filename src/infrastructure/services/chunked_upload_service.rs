@@ -770,8 +770,15 @@ impl ChunkedUploadService {
     }
 
     /// Cancel an upload and cleanup — disk I/O outside lock.
-    async fn cancel_upload_inner(&self, upload_id: &str, user_id: &str) -> Result<(), String> {
-        self.verify_session_owner(upload_id, user_id)?;
+    ///
+    /// Returns:
+    /// - `DomainError::NotFound` if no session matches `upload_id` for `user_id`
+    ///   (covers both "session missing" and "owned by someone else" — same
+    ///   error for anti-enumeration).
+    /// - `DomainError::InternalError` for unexpected disk I/O failures.
+    async fn cancel_upload_inner(&self, upload_id: &str, user_id: &str) -> Result<(), DomainError> {
+        self.verify_session_owner(upload_id, user_id)
+            .map_err(|_| DomainError::not_found("Upload", upload_id))?;
 
         // Remove from map (~µs)
         let removed = self.sessions.remove(upload_id).map(|(_, s)| s);
@@ -861,9 +868,11 @@ impl ChunkedUploadPort for ChunkedUploadService {
     }
 
     async fn cancel_upload(&self, upload_id: &str, user_id: Uuid) -> Result<(), DomainError> {
+        // Inner function now returns DomainError with proper variants
+        // (NotFound for missing/wrong-owner sessions, InternalError otherwise),
+        // so no mapping needed here.
         self.cancel_upload_inner(upload_id, &user_id.to_string())
             .await
-            .map_err(|e| DomainError::new(ErrorKind::InternalError, "ChunkedUpload", e))
     }
 
     fn should_use_chunked(&self, size: u64) -> bool {

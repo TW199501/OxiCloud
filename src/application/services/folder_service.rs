@@ -1,23 +1,39 @@
 use crate::application::dtos::folder_dto::{
     CreateFolderDto, FolderDto, MoveFolderDto, RenameFolderDto,
 };
-use crate::application::ports::inbound::FolderUseCase;
+use crate::application::ports::authorization_ports::AuthorizationEngine;
+use crate::application::ports::folder_ports::FolderUseCase;
 use crate::common::errors::{DomainError, ErrorKind};
 use crate::domain::repositories::folder_repository::FolderRepository;
+use crate::domain::services::authorization::{Permission, Resource, Subject};
 use crate::domain::services::path_service::{StoragePath, validate_storage_name};
 use crate::infrastructure::repositories::pg::folder_db_repository::FolderDbRepository;
+use crate::infrastructure::services::pg_acl_engine::PgAclEngine;
 use std::sync::Arc;
 use uuid::Uuid;
 
 /// Implementation of the use case for folder operations
 pub struct FolderService {
     folder_storage: Arc<FolderDbRepository>,
+    authz: Arc<PgAclEngine>,
 }
 
 impl FolderService {
     /// Creates a new folder service
-    pub fn new(folder_storage: Arc<FolderDbRepository>) -> Self {
-        Self { folder_storage }
+    pub fn new(folder_storage: Arc<FolderDbRepository>, authz: Arc<PgAclEngine>) -> Self {
+        Self {
+            folder_storage,
+            authz,
+        }
+    }
+
+    /// Helper: parse a folder id string into a `Resource::Folder`. Returns
+    /// `DomainError::not_found` on parse error (anti-enumeration — the same
+    /// error as "folder does not exist").
+    fn folder_resource(id: &str) -> Result<Resource, DomainError> {
+        Uuid::parse_str(id)
+            .map(Resource::Folder)
+            .map_err(|_| DomainError::not_found("Folder", id))
     }
 
     /// Creates a stub implementation for testing and middleware
@@ -25,7 +41,19 @@ impl FolderService {
         struct FolderServiceStub;
 
         impl FolderUseCase for FolderServiceStub {
-            async fn create_folder(&self, _dto: CreateFolderDto) -> Result<FolderDto, DomainError> {
+            async fn require_permission(
+                &self,
+                _caller_id: Uuid,
+                _permission: Permission,
+                _folder_id: &str,
+            ) -> Result<(), DomainError> {
+                Ok(())
+            }
+            async fn create_folder_with_perms(
+                &self,
+                _dto: CreateFolderDto,
+                _user_id: Uuid,
+            ) -> Result<FolderDto, DomainError> {
                 Ok(FolderDto::empty())
             }
 
@@ -33,7 +61,7 @@ impl FolderService {
                 Ok(FolderDto::empty())
             }
 
-            async fn get_folder_owned(
+            async fn get_folder_with_perms(
                 &self,
                 _id: &str,
                 _caller_id: Uuid,
@@ -52,7 +80,7 @@ impl FolderService {
                 Ok(vec![])
             }
 
-            async fn list_folders_for_owner(
+            async fn list_folders_with_perms(
                 &self,
                 _parent_id: Option<&str>,
                 _owner_id: Uuid,
@@ -78,7 +106,7 @@ impl FolderService {
                 )
             }
 
-            async fn list_folders_for_owner_paginated(
+            async fn list_folders_paginated_with_perms(
                 &self,
                 _parent_id: Option<&str>,
                 _owner_id: Uuid,
@@ -97,7 +125,7 @@ impl FolderService {
                 )
             }
 
-            async fn rename_folder(
+            async fn rename_folder_with_perms(
                 &self,
                 _id: &str,
                 _dto: RenameFolderDto,
@@ -106,7 +134,7 @@ impl FolderService {
                 Ok(FolderDto::empty())
             }
 
-            async fn move_folder(
+            async fn move_folder_with_perms(
                 &self,
                 _id: &str,
                 _dto: MoveFolderDto,
@@ -115,7 +143,11 @@ impl FolderService {
                 Ok(FolderDto::empty())
             }
 
-            async fn delete_folder(&self, _id: &str, _caller_id: Uuid) -> Result<(), DomainError> {
+            async fn delete_folder_with_perms(
+                &self,
+                _id: &str,
+                _caller_id: Uuid,
+            ) -> Result<(), DomainError> {
                 Ok(())
             }
 
@@ -133,9 +165,34 @@ impl FolderService {
 }
 
 impl FolderUseCase for FolderService {
+    /// Verifies the caller has the given permition on a resource
+    /// `folder_id`. `None` is the caller's root namespace and always allowed.
+    ///
+    /// Returns `Ok(())` when permitted, `DomainError::not_found(...)` when not
+    /// (anti-enumeration — same error as "folder doesn't exist").
+    ///
+    /// Used by handlers that need a fail-fast pre-check BEFORE spooling
+    /// large request bodies (file upload, chunked upload). The authoritative
+    /// check happens again inside the upload/management services before any
+    /// DB write — this is a UX/resource optimization, not a security boundary.
+    async fn require_permission(
+        &self,
+        caller_id: Uuid,
+        permission: Permission,
+        folder_id: &str,
+    ) -> Result<(), DomainError> {
+        let resource = Self::folder_resource(folder_id)?;
+        self.authz
+            .require(Subject::User(caller_id), permission, resource)
+            .await
+    }
+
     /// Creates a new folder
-    async fn create_folder(&self, dto: CreateFolderDto) -> Result<FolderDto, DomainError> {
-        // Input validation
+    async fn create_folder_with_perms(
+        &self,
+        dto: CreateFolderDto,
+        caller_id: Uuid,
+    ) -> Result<FolderDto, DomainError> {
         if let Err(reason) = validate_storage_name(&dto.name) {
             return Err(DomainError::validation_error(format!(
                 "Invalid folder name '{}': {reason}",
@@ -143,27 +200,24 @@ impl FolderUseCase for FolderService {
             )));
         }
 
-        // If a parent_id is provided, verify it exists
-        if let Some(parent_id) = &dto.parent_id {
-            let parent_exists = self.folder_storage.get_folder(parent_id).await.is_ok();
-            if !parent_exists {
-                return Err(DomainError::not_found("Folder", parent_id));
-            }
-        }
+        let Some(parent_id) = dto.parent_id.as_deref() else {
+            return Err(DomainError::validation_error(
+                "Root folder creation is reserved for registration",
+            ));
+        };
+        let parent_resource = Self::folder_resource(parent_id)?;
+        self.authz
+            .require(
+                Subject::User(caller_id),
+                Permission::Create,
+                parent_resource,
+            )
+            .await?;
 
-        // Create the folder
         let folder = self
             .folder_storage
             .create_folder(dto.name, dto.parent_id)
-            .await
-            .map_err(|e| {
-                DomainError::internal_error(
-                    "FolderStorage",
-                    format!("Failed to create folder: {}", e),
-                )
-            })?;
-
-        // Convert to DTO
+            .await?;
         Ok(FolderDto::from(folder))
     }
 
@@ -204,19 +258,21 @@ impl FolderUseCase for FolderService {
         Ok(FolderDto::from(folder))
     }
 
-    /// Gets a folder by its ID, enforcing that `caller_id` is the owner.
-    async fn get_folder_owned(&self, id: &str, caller_id: Uuid) -> Result<FolderDto, DomainError> {
-        let folder_dto = self.get_folder(id).await?;
-        if folder_dto.owner_id.as_deref() != Some(&caller_id.to_string()) {
-            tracing::warn!(
-                "get_folder_owned: user '{}' attempted to access folder '{}' owned by '{:?}'",
-                caller_id,
-                id,
-                folder_dto.owner_id
-            );
-            return Err(DomainError::not_found("Folder", id));
-        }
-        Ok(folder_dto)
+    /// Gets a folder by its ID, enforcing that `caller_id` has `Read` access
+    /// (via ownership or a grant — including cascading from ancestor folders).
+    async fn get_folder_with_perms(
+        &self,
+        id: &str,
+        caller_id: Uuid,
+    ) -> Result<FolderDto, DomainError> {
+        self.authz
+            .require(
+                Subject::User(caller_id),
+                Permission::Read,
+                Self::folder_resource(id)?,
+            )
+            .await?;
+        self.get_folder(id).await
     }
 
     /// Gets a folder by its path
@@ -245,6 +301,7 @@ impl FolderUseCase for FolderService {
             .list_folders(parent_id)
             .await
             .map_err(|e| {
+                tracing::warn!("errror while fetching folders {}", e);
                 DomainError::internal_error(
                     "FolderStorage",
                     format!("Failed to list folders in parent: {:?}: {}", parent_id, e),
@@ -257,59 +314,77 @@ impl FolderUseCase for FolderService {
 
     /// Lists folders scoped to a specific owner.
     /// Self-healing: if listing root folders and none exist, creates a home folder.
-    async fn list_folders_for_owner(
+    async fn list_folders_with_perms(
         &self,
         parent_id: Option<&str>,
-        owner_id: Uuid,
+        caller_id: Uuid,
     ) -> Result<Vec<FolderDto>, DomainError> {
-        let owner_id_short = {
-            let s = owner_id.to_string();
-            s[..8.min(s.len())].to_string()
-        };
-        let folders = self
-            .folder_storage
-            .list_folders_by_owner(parent_id, owner_id)
-            .await
-            .map_err(|e| {
-                DomainError::internal_error(
-                    "FolderStorage",
-                    format!(
-                        "Failed to list folders for owner '{}' in parent {:?}: {}",
-                        owner_id, parent_id, e
-                    ),
+        if let Some(parent_id_unwrapped) = parent_id {
+            // check authorisation
+            self.authz
+                .require(
+                    Subject::User(caller_id),
+                    Permission::Read,
+                    Self::folder_resource(parent_id_unwrapped)?,
                 )
-            })?;
-
-        // Self-healing: if listing root folders and none exist, create a home folder
-        // This ensures the frontend always gets a valid userHomeFolderId
-        if parent_id.is_none() && folders.is_empty() {
-            tracing::info!(
-                "No root folders found for user {}, creating home folder automatically",
-                owner_id
-            );
-            let folder_name = format!("My Folder - {}", owner_id_short);
-            match self
+                .await?;
+            return self.list_folders(parent_id).await;
+        } else {
+            // No parent defined grab user's homes
+            let folders = self
                 .folder_storage
-                .create_home_folder(owner_id, folder_name.clone())
+                .list_folders_by_owner(parent_id, caller_id)
                 .await
-            {
-                Ok(home_folder) => {
-                    tracing::info!(
-                        "Created home folder '{}' for user {}",
-                        folder_name,
-                        owner_id
-                    );
-                    return Ok(vec![FolderDto::from(home_folder)]);
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to create home folder for user {}: {}", owner_id, e);
-                    // Return empty list rather than failing - user might not have storage quota, etc.
+                .map_err(|e| {
+                    DomainError::internal_error(
+                        "FolderStorage",
+                        format!(
+                            "Failed to list folders for owner '{}' in parent {:?}: {}",
+                            caller_id, parent_id, e
+                        ),
+                    )
+                })?;
+
+            if folders.is_empty() {
+                // Self-healing: if listing root folders and none exist, create a home folder
+                // This ensures the frontend always gets a valid userHomeFolderId
+                tracing::info!(
+                    "No root folders found for user {}, creating home folder automatically",
+                    caller_id
+                );
+                let owner_id_short = {
+                    let s = caller_id.to_string();
+                    s[..8.min(s.len())].to_string()
+                };
+                // TODO: what about i18n ?
+                let folder_name = format!("My Folder - {}", owner_id_short);
+                match self
+                    .folder_storage
+                    .create_home_folder(caller_id, folder_name.clone())
+                    .await
+                {
+                    Ok(home_folder) => {
+                        tracing::info!(
+                            "Created home folder '{}' for user {}",
+                            folder_name,
+                            caller_id
+                        );
+                        return Ok(vec![FolderDto::from(home_folder)]);
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to create home folder for user {}: {}",
+                            caller_id,
+                            e
+                        );
+                        // Return empty list rather than failing - user might not have storage quota, etc.
+                    }
                 }
             }
+            Ok(folders.into_iter().map(FolderDto::from).collect())
         }
-
-        Ok(folders.into_iter().map(FolderDto::from).collect())
     }
+    // TODO: move self healing in other part (on account creation on or login ?)
 
     /// Lists folders with pagination
     async fn list_folders_paginated(
@@ -347,7 +422,7 @@ impl FolderUseCase for FolderService {
     }
 
     /// Lists folders with pagination, scoped to a specific owner.
-    async fn list_folders_for_owner_paginated(
+    async fn list_folders_paginated_with_perms(
         &self,
         parent_id: Option<&str>,
         owner_id: Uuid,
@@ -356,7 +431,17 @@ impl FolderUseCase for FolderService {
     {
         let pagination = pagination.validate_and_adjust();
 
-        let (folders, total_items) = self
+        if let Some(parent_id_unwrapped) = parent_id {
+            self.authz
+                .require(
+                    Subject::User(owner_id),
+                    Permission::Read,
+                    Self::folder_resource(parent_id_unwrapped)?,
+                )
+                .await?;
+            return self.list_folders_paginated(parent_id, &pagination).await;
+        } else {
+            let (folders, total_items) = self
             .folder_storage
             .list_folders_by_owner_paginated(
                 parent_id,
@@ -376,26 +461,26 @@ impl FolderUseCase for FolderService {
                 )
             })?;
 
-        let total = total_items.unwrap_or(folders.len());
+            let total = total_items.unwrap_or(folders.len());
 
-        let response = crate::application::dtos::pagination::PaginatedResponseDto::new(
-            folders.into_iter().map(FolderDto::from).collect(),
-            pagination.page,
-            pagination.page_size,
-            total,
-        );
+            let response = crate::application::dtos::pagination::PaginatedResponseDto::new(
+                folders.into_iter().map(FolderDto::from).collect(),
+                pagination.page,
+                pagination.page_size,
+                total,
+            );
 
-        Ok(response)
+            Ok(response)
+        }
     }
 
-    /// Renames a folder after verifying ownership.
-    async fn rename_folder(
+    /// Renames a folder after verifying the caller has `Update` permission.
+    async fn rename_folder_with_perms(
         &self,
         id: &str,
         dto: RenameFolderDto,
         caller_id: Uuid,
     ) -> Result<FolderDto, DomainError> {
-        // Input validation
         if let Err(reason) = validate_storage_name(&dto.name) {
             return Err(DomainError::validation_error(format!(
                 "Invalid folder name '{}': {reason}",
@@ -403,20 +488,14 @@ impl FolderUseCase for FolderService {
             )));
         }
 
-        // Verify the folder exists and belongs to the caller
-        let existing_folder = self.folder_storage.get_folder(id).await?;
+        self.authz
+            .require(
+                Subject::User(caller_id),
+                Permission::Update,
+                Self::folder_resource(id)?,
+            )
+            .await?;
 
-        if existing_folder.owner_id() != Some(caller_id) {
-            tracing::warn!(
-                "rename_folder: user '{}' attempted to rename folder '{}' owned by '{:?}'",
-                caller_id,
-                id,
-                existing_folder.owner_id()
-            );
-            return Err(DomainError::not_found("Folder", id));
-        }
-
-        // Rename folder — UPDATE RETURNING gives us the updated row directly
         let folder = self
             .folder_storage
             .rename_folder(id, dto.name)
@@ -431,29 +510,25 @@ impl FolderUseCase for FolderService {
         Ok(FolderDto::from(folder))
     }
 
-    /// Moves a folder to a new parent after verifying ownership.
-    async fn move_folder(
+    /// Moves a folder to a new parent. Requires `Update` on the source and
+    /// `Create` on the destination parent (if any).
+    async fn move_folder_with_perms(
         &self,
         id: &str,
         dto: MoveFolderDto,
         caller_id: Uuid,
     ) -> Result<FolderDto, DomainError> {
-        // Verify the source folder exists and belongs to the caller
-        let source_folder = self.folder_storage.get_folder(id).await?;
+        let source_resource = Self::folder_resource(id)?;
+        self.authz
+            .require(
+                Subject::User(caller_id),
+                Permission::Update,
+                source_resource,
+            )
+            .await?;
 
-        if source_folder.owner_id() != Some(caller_id) {
-            tracing::warn!(
-                "move_folder: user '{}' attempted to move folder '{}' owned by '{:?}'",
-                caller_id,
-                id,
-                source_folder.owner_id()
-            );
-            return Err(DomainError::not_found("Folder", id));
-        }
-
-        // If a parent_id is specified, verify it exists and belongs to the caller
         if let Some(parent_id) = &dto.parent_id {
-            // Verify we are not trying to move the folder into itself or one of its descendants
+            // Cannot move a folder into itself (cycle guard).
             if parent_id == id {
                 return Err(DomainError::new(
                     ErrorKind::InvalidInput,
@@ -461,27 +536,17 @@ impl FolderUseCase for FolderService {
                     "Cannot move a folder into itself",
                 ));
             }
-
-            // Verify the destination exists and is owned by the caller
-            let parent = self
-                .folder_storage
-                .get_folder(parent_id)
-                .await
-                .map_err(|_| DomainError::not_found("Folder", parent_id))?;
-            if parent.owner_id() != Some(caller_id) {
-                tracing::warn!(
-                    "move_folder: user '{}' attempted to move into folder '{}' owned by '{:?}'",
-                    caller_id,
-                    parent_id,
-                    parent.owner_id()
-                );
-                return Err(DomainError::not_found("Folder", parent_id));
-            }
-
-            // TODO: Ideally we should verify the entire hierarchy to prevent cycles
+            let parent_resource = Self::folder_resource(parent_id)?;
+            self.authz
+                .require(
+                    Subject::User(caller_id),
+                    Permission::Create,
+                    parent_resource,
+                )
+                .await?;
+            // TODO: full descendant-cycle check (moving a folder into one of its own descendants)
         }
 
-        // Move folder — UPDATE RETURNING gives us the updated row directly
         let parent_ref = dto.parent_id.as_deref();
         let folder = self
             .folder_storage
@@ -497,22 +562,18 @@ impl FolderUseCase for FolderService {
         Ok(FolderDto::from(folder))
     }
 
-    /// Deletes a folder after verifying ownership.
-    async fn delete_folder(&self, id: &str, caller_id: Uuid) -> Result<(), DomainError> {
-        // Verify the folder exists and belongs to the caller
-        let folder = self.folder_storage.get_folder(id).await?;
+    /// Deletes a folder after verifying the caller has `Delete` permission.
+    /// The DB trigger `trg_cleanup_grants_folder` cleans up `access_grants`
+    /// rows targeting the deleted folder automatically.
+    async fn delete_folder_with_perms(&self, id: &str, caller_id: Uuid) -> Result<(), DomainError> {
+        self.authz
+            .require(
+                Subject::User(caller_id),
+                Permission::Delete,
+                Self::folder_resource(id)?,
+            )
+            .await?;
 
-        if folder.owner_id() != Some(caller_id) {
-            tracing::warn!(
-                "delete_folder: user '{}' attempted to delete folder '{}' owned by '{:?}'",
-                caller_id,
-                id,
-                folder.owner_id()
-            );
-            return Err(DomainError::not_found("Folder", id));
-        }
-
-        // Delete the folder
         self.folder_storage.delete_folder(id).await.map_err(|e| {
             DomainError::internal_error(
                 "FolderStorage",
