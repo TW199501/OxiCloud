@@ -326,7 +326,7 @@ async fn get_current_user(
 /// DTO for updating the user's profile image.
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct UpdateUserImageDto {
-    /// New image URL (https/http) or data URI (data:image/…;base64,…). Null to clear.
+    /// Image URL (https/http) or data URI (data:image/png|webp|jpeg;base64,…). Null to clear.
     pub image: Option<String>,
 }
 
