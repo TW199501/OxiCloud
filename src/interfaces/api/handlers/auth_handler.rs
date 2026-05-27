@@ -6,11 +6,12 @@ use axum::{
     routing::{get, post, put},
 };
 use std::sync::Arc;
+use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::application::dtos::user_dto::{
-    ChangePasswordDto, LoginDto, OidcCallbackQueryDto, OidcExchangeDto, OidcProviderInfoDto,
-    RefreshTokenDto, RegisterDto, SetupAdminDto,
+    AuthResponseDto, ChangePasswordDto, LoginDto, OidcCallbackQueryDto, OidcExchangeDto,
+    OidcProviderInfoDto, RefreshTokenDto, RegisterDto, SetupAdminDto, UserDto,
 };
 use crate::application::services::auth_application_service::OidcCallbackResult;
 use crate::common::di::AppState;
@@ -18,7 +19,6 @@ use crate::interfaces::api::cookie_auth;
 use crate::interfaces::errors::AppError;
 use crate::interfaces::middleware::auth::CurrentUserId;
 use serde::Deserialize;
-use utoipa::ToSchema;
 
 /// Public auth routes — no authentication required.
 pub fn auth_public_routes() -> Router<Arc<AppState>> {
@@ -60,7 +60,20 @@ pub fn setup_route() -> Router<Arc<AppState>> {
     Router::new().route("/setup", post(setup_admin))
 }
 
-async fn register(
+/// Register a new user account.
+#[utoipa::path(
+    post,
+    path = "/api/auth/register",
+    request_body = RegisterDto,
+    responses(
+        (status = 201, description = "User registered successfully", body = UserDto),
+        (status = 400, description = "Validation error"),
+        (status = 403, description = "Registration disabled"),
+        (status = 409, description = "Username or email already taken"),
+    ),
+    tag = "auth"
+)]
+pub async fn register(
     State(state): State<Arc<AppState>>,
     Json(dto): Json<RegisterDto>,
 ) -> Result<impl IntoResponse, AppError> {
@@ -122,7 +135,23 @@ async fn register(
     }
 }
 
-async fn login(
+/// Authenticate with username and password.
+///
+/// On success, sets `oxicloud_access`, `oxicloud_refresh`, and `oxicloud_csrf`
+/// HttpOnly cookies in addition to returning the tokens in the JSON body.
+#[utoipa::path(
+    post,
+    path = "/api/auth/login",
+    request_body = LoginDto,
+    responses(
+        (status = 200, description = "Login successful — tokens in body and cookies", body = AuthResponseDto),
+        (status = 401, description = "Invalid credentials or password login disabled"),
+        (status = 403, description = "Account disabled"),
+        (status = 429, description = "Account temporarily locked (too many failed attempts)"),
+    ),
+    tag = "auth"
+)]
+pub async fn login(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(dto): Json<LoginDto>,
@@ -238,10 +267,25 @@ async fn login(
     }
 }
 
-/// Token refresh — accepts the refresh token from **either**:
-/// 1. JSON body `{ "refresh_token": "..." }` (API clients, backward compat)
-/// 2. HttpOnly cookie `oxicloud_refresh` (browsers)
-async fn refresh_token(
+/// Refresh an access token.
+///
+/// Accepts the refresh token from **either**:
+/// 1. JSON body `{ "refresh_token": "..." }` (API clients / backward compat)
+/// 2. HttpOnly `oxicloud_refresh` cookie (browsers)
+///
+/// Issues new access + refresh tokens and rotates all three auth cookies.
+#[utoipa::path(
+    post,
+    path = "/api/auth/refresh",
+    request_body(content = inline(RefreshTokenDto),
+        description = "Optional — omit when using the HttpOnly cookie"),
+    responses(
+        (status = 200, description = "New tokens issued", body = AuthResponseDto),
+        (status = 401, description = "Refresh token missing, expired, or revoked"),
+    ),
+    tag = "auth"
+)]
+pub async fn refresh_token(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     body: axum::body::Bytes,
@@ -283,7 +327,18 @@ async fn refresh_token(
     Ok(response)
 }
 
-async fn get_current_user(
+/// Return the authenticated user's profile, including live storage usage.
+#[utoipa::path(
+    get,
+    path = "/api/auth/me",
+    responses(
+        (status = 200, description = "Current user profile", body = UserDto),
+        (status = 401, description = "Not authenticated"),
+    ),
+    security(("bearerAuth" = [])),
+    tag = "auth"
+)]
+pub async fn get_current_user(
     State(state): State<Arc<AppState>>,
     CurrentUserId(user_id): CurrentUserId,
 ) -> Result<impl IntoResponse, AppError> {
@@ -330,7 +385,20 @@ pub struct UpdateUserImageDto {
     pub image: Option<String>,
 }
 
-async fn change_password(
+/// Change the current user's password.
+#[utoipa::path(
+    put,
+    path = "/api/auth/change-password",
+    request_body = ChangePasswordDto,
+    responses(
+        (status = 200, description = "Password changed successfully"),
+        (status = 400, description = "New password does not meet requirements"),
+        (status = 401, description = "Not authenticated or current password incorrect"),
+    ),
+    security(("bearerAuth" = [])),
+    tag = "auth"
+)]
+pub async fn change_password(
     State(state): State<Arc<AppState>>,
     CurrentUserId(user_id): CurrentUserId,
     Json(dto): Json<ChangePasswordDto>,
@@ -348,6 +416,7 @@ async fn change_password(
     Ok(StatusCode::OK)
 }
 
+// TODO: add utoipa
 pub async fn update_user_image(
     State(state): State<Arc<AppState>>,
     CurrentUserId(user_id): CurrentUserId,
@@ -371,7 +440,24 @@ pub async fn update_user_image(
     }
 }
 
-async fn logout(
+/// Revoke the current session and clear auth cookies.
+///
+/// Accepts the refresh token from **either** a JSON body
+/// `{ "refresh_token": "..." }` (API clients) or the `oxicloud_refresh`
+/// HttpOnly cookie (browsers).
+#[utoipa::path(
+    post,
+    path = "/api/auth/logout",
+    request_body(content = inline(RefreshTokenDto),
+        description = "Optional — omit when using the HttpOnly cookie"),
+    responses(
+        (status = 200, description = "Logged out, auth cookies cleared"),
+        (status = 401, description = "Not authenticated or refresh token missing"),
+    ),
+    security(("bearerAuth" = [])),
+    tag = "auth"
+)]
+pub async fn logout(
     State(state): State<Arc<AppState>>,
     CurrentUserId(user_id): CurrentUserId,
     headers: HeaderMap,
@@ -405,16 +491,23 @@ async fn logout(
     Ok(response)
 }
 
-/// POST /api/setup — One-time endpoint to create the first admin user.
+/// One-time endpoint to create the first admin user.
 ///
 /// Available only when the system is not yet initialized (no admin exists).
-/// Once the admin is created, the system is marked as initialized and this
-/// endpoint returns 403 for all subsequent requests.
-///
-/// Uses an atomic "claim" operation to prevent race conditions: even if two
-/// requests arrive simultaneously, only one will succeed in marking the
-/// system as initialized and creating the admin.
-async fn setup_admin(
+/// Once the admin is created the endpoint permanently returns 403.
+/// Uses an atomic "claim" operation so concurrent requests cannot both succeed.
+#[utoipa::path(
+    post,
+    path = "/api/setup",
+    request_body = SetupAdminDto,
+    responses(
+        (status = 201, description = "First admin created and system initialized", body = UserDto),
+        (status = 403, description = "System already initialized"),
+        (status = 503, description = "Auth service not configured"),
+    ),
+    tag = "auth"
+)]
+pub async fn setup_admin(
     State(state): State<Arc<AppState>>,
     Json(dto): Json<SetupAdminDto>,
 ) -> Result<impl IntoResponse, AppError> {
@@ -498,19 +591,28 @@ async fn setup_admin(
     Ok((StatusCode::CREATED, Json(user)))
 }
 
-/// Get system status - returns whether admin is configured
-/// This is a public endpoint used to determine if setup is needed
-#[derive(serde::Serialize)]
-struct SystemStatus {
-    /// Whether the system has been set up with an admin
+/// System initialisation state, returned by `GET /api/auth/status`.
+#[derive(serde::Serialize, ToSchema)]
+pub struct SystemStatus {
+    /// Whether the system has been set up with an admin.
     initialized: bool,
-    /// Number of admin users in the system
+    /// Number of admin users in the system.
     admin_count: i64,
-    /// Whether registration is allowed (only if admin exists)
+    /// Whether self-registration is allowed.
     registration_allowed: bool,
 }
 
-async fn get_system_status(
+/// Return the system initialisation state (used by the UI before setup).
+#[utoipa::path(
+    get,
+    path = "/api/auth/status",
+    responses(
+        (status = 200, description = "System status", body = SystemStatus),
+        (status = 503, description = "Auth service not configured"),
+    ),
+    tag = "auth"
+)]
+pub async fn get_system_status(
     State(state): State<Arc<AppState>>,
 ) -> Result<impl IntoResponse, AppError> {
     let auth_service = state
@@ -552,8 +654,21 @@ async fn get_system_status(
 // OIDC Handlers
 // ============================================================================
 
-/// GET /api/auth/oidc/providers — Returns OIDC provider info for the UI
-async fn oidc_providers(State(state): State<Arc<AppState>>) -> Result<impl IntoResponse, AppError> {
+/// Return OIDC provider information for the login UI.
+///
+/// Returns `enabled: false` when OIDC is not configured.
+#[utoipa::path(
+    get,
+    path = "/api/auth/oidc/providers",
+    responses(
+        (status = 200, description = "OIDC provider info (enabled=false when OIDC not configured)", body = OidcProviderInfoDto),
+        (status = 503, description = "Auth service not configured"),
+    ),
+    tag = "auth"
+)]
+pub async fn oidc_providers(
+    State(state): State<Arc<AppState>>,
+) -> Result<impl IntoResponse, AppError> {
     let auth_service = state
         .auth_service
         .as_ref()
@@ -580,8 +695,23 @@ async fn oidc_providers(State(state): State<Arc<AppState>>) -> Result<impl IntoR
     }))
 }
 
-/// GET /api/auth/oidc/authorize — Redirects user to the OIDC provider
-async fn oidc_authorize(State(state): State<Arc<AppState>>) -> Result<impl IntoResponse, AppError> {
+/// Initiate OIDC authorization — redirects to the configured identity provider.
+///
+/// Generates PKCE, CSRF state, and nonce then issues a 302 redirect to the
+/// provider's authorization endpoint.
+#[utoipa::path(
+    get,
+    path = "/api/auth/oidc/authorize",
+    responses(
+        (status = 302, description = "Redirect to OIDC provider authorization URL"),
+        (status = 404, description = "OIDC not enabled"),
+        (status = 503, description = "Auth service not configured"),
+    ),
+    tag = "auth"
+)]
+pub async fn oidc_authorize(
+    State(state): State<Arc<AppState>>,
+) -> Result<impl IntoResponse, AppError> {
     let auth_service = state
         .auth_service
         .as_ref()
@@ -605,8 +735,26 @@ async fn oidc_authorize(State(state): State<Arc<AppState>>) -> Result<impl IntoR
     Ok(Redirect::temporary(&authorize_url))
 }
 
-/// GET /api/auth/oidc/callback?code=...&state=... — Handles OIDC callback
-async fn oidc_callback(
+/// Handle the OIDC provider callback.
+///
+/// Validates the `state` / PKCE / nonce, exchanges the code for tokens, then
+/// redirects the browser to the frontend with a short-lived exchange code
+/// (`/?oidc_code=…`).
+#[utoipa::path(
+    get,
+    path = "/api/auth/oidc/callback",
+    params(
+        ("code" = String, Query, description = "Authorization code from the OIDC provider"),
+        ("state" = String, Query, description = "CSRF state value echoed by the provider"),
+    ),
+    responses(
+        (status = 302, description = "Redirect to frontend with one-time exchange code"),
+        (status = 401, description = "OIDC validation failed (bad state, nonce, or code)"),
+        (status = 404, description = "OIDC not enabled"),
+    ),
+    tag = "auth"
+)]
+pub async fn oidc_callback(
     State(state): State<Arc<AppState>>,
     Query(query): Query<OidcCallbackQueryDto>,
 ) -> Result<impl IntoResponse, AppError> {
@@ -694,9 +842,21 @@ async fn oidc_callback(
     }
 }
 
-/// POST /api/auth/oidc/exchange — Exchange one-time code for auth tokens
-/// Request body: { "code": "<one_time_code>" }
-async fn oidc_exchange(
+/// Exchange a one-time OIDC code for access + refresh tokens.
+///
+/// The frontend calls this after being redirected back with `?oidc_code=…`.
+/// The exchange code is valid for a single use and expires in 60 s.
+#[utoipa::path(
+    post,
+    path = "/api/auth/oidc/exchange",
+    request_body = OidcExchangeDto,
+    responses(
+        (status = 200, description = "Tokens issued, auth cookies set", body = AuthResponseDto),
+        (status = 401, description = "Exchange code invalid or expired"),
+    ),
+    tag = "auth"
+)]
+pub async fn oidc_exchange(
     State(state): State<Arc<AppState>>,
     Json(body): Json<OidcExchangeDto>,
 ) -> Result<Response, AppError> {

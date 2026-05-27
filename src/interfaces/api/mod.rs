@@ -7,7 +7,8 @@ pub use routes::create_api_routes;
 pub use routes::create_health_routes;
 pub use routes::create_public_api_routes;
 
-use utoipa::OpenApi;
+use utoipa::openapi::security::{Http, HttpAuthScheme, SecurityScheme};
+use utoipa::{Modify, OpenApi};
 
 use crate::application::dtos::contact_dto::{
     AddressDto, ContactDto, ContactGroupDto, EmailDto, PhoneDto,
@@ -40,12 +41,13 @@ use crate::application::dtos::trash_dto::{
     DeletePermanentlyRequest, MoveToTrashRequest, RestoreFromTrashRequest, TrashedItemDto,
 };
 use crate::application::dtos::user_dto::{
-    AuthResponseDto, ChangePasswordDto, LoginDto, RefreshTokenDto, RegisterDto, SetupAdminDto,
-    UserDto,
+    AuthResponseDto, ChangePasswordDto, LoginDto, OidcExchangeDto, OidcProviderInfoDto,
+    RefreshTokenDto, RegisterDto, SetupAdminDto, UserDto,
 };
 use crate::application::ports::chunked_upload_ports::{
     ChunkUploadResponseDto, CreateUploadResponseDto, UploadStatusResponseDto,
 };
+use crate::interfaces::api::handlers::auth_handler::SystemStatus;
 use crate::interfaces::api::handlers::chunked_upload_handler::{
     CompleteUploadResponse, CreateUploadRequest,
 };
@@ -60,7 +62,21 @@ use crate::interfaces::api::handlers::file_handler::MoveFilePayload;
 
 #[derive(OpenApi)]
 #[openapi(
+    modifiers(&SecurityAddon),
     paths(
+        // Auth handlers (public, protected, OIDC)
+        handlers::auth_handler::register,
+        handlers::auth_handler::login,
+        handlers::auth_handler::refresh_token,
+        handlers::auth_handler::get_current_user,
+        handlers::auth_handler::change_password,
+        handlers::auth_handler::logout,
+        handlers::auth_handler::setup_admin,
+        handlers::auth_handler::get_system_status,
+        handlers::auth_handler::oidc_providers,
+        handlers::auth_handler::oidc_authorize,
+        handlers::auth_handler::oidc_callback,
+        handlers::auth_handler::oidc_exchange,
         // File handlers (free functions — see file_handler.rs for why)
         handlers::file_handler::list_files_query,
         handlers::file_handler::upload_file_with_thumbnails,
@@ -236,6 +252,9 @@ use crate::interfaces::api::handlers::file_handler::MoveFilePayload;
             AuthResponseDto,
             ChangePasswordDto,
             RefreshTokenDto,
+            SystemStatus,
+            OidcProviderInfoDto,
+            OidcExchangeDto,
             // Share schemas
             ShareDto,
             SharePermissionsDto,
@@ -302,6 +321,7 @@ use crate::interfaces::api::handlers::file_handler::MoveFilePayload;
         )
     ),
     tags(
+        (name = "auth", description = "Authentication and session management endpoints"),
         (name = "files", description = "File management endpoints"),
         (name = "folders", description = "Folder management endpoints"),
         (name = "trash", description = "Trash / recycle bin endpoints"),
@@ -327,6 +347,19 @@ use crate::interfaces::api::handlers::file_handler::MoveFilePayload;
     )
 )]
 pub struct ApiDoc;
+
+/// Injects the `bearerAuth` HTTP Bearer security scheme into the generated spec.
+struct SecurityAddon;
+
+impl Modify for SecurityAddon {
+    fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
+        let components = openapi.components.get_or_insert_with(Default::default);
+        components.add_security_scheme(
+            "bearerAuth",
+            SecurityScheme::Http(Http::new(HttpAuthScheme::Bearer)),
+        );
+    }
+}
 
 #[cfg(test)]
 mod tests {
