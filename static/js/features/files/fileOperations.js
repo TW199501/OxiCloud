@@ -4,7 +4,7 @@
  */
 
 import { refreshUserData } from '../../app/authSession.js';
-import { loadFiles } from '../../app/filesView.js';
+import { addItem as filesViewAddItem, loadFiles } from '../../app/filesView.js';
 import { app } from '../../app/state.js';
 import { showConfirmDialog, ui } from '../../app/ui.js';
 import { getCsrfHeaders, getCsrfToken } from '../../core/csrf.js';
@@ -781,7 +781,7 @@ const fileOps = {
 
                 // Optimistic UI: add folder card directly from server response
                 // — no reload needed since the backend already confirmed creation.
-                ui.addFolderToView(folder);
+                filesViewAddItem(folder);
 
                 ui.showNotification('Folder created', `"${name}" created successfully`);
             } else {

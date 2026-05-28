@@ -105,3 +105,92 @@
 .toggle-btn i {
     pointer-events: none;
 }
+
+/* ── Group-by selector (inside .view-toggle) ────────────── */
+
+.view-toggle-separator {
+    width: 1px;
+    height: 20px;
+    background: var(--color-border-medium);
+    align-self: center;
+    margin: 0 2px;
+}
+
+.view-toggle-separator.hidden {
+    display: none;
+}
+
+.group-by-selector {
+    position: relative;
+}
+
+.group-by-selector.hidden {
+    display: none;
+}
+
+.group-by-btn.active {
+    color: var(--color-accent);
+}
+
+/* Active label shown inline next to the icon */
+.group-by-label {
+    display: none;
+    font-size: 0.78rem;
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+/* When a group-by is selected the label has text — expand the button to fit */
+.group-by-btn:has(.group-by-label:not(:empty)) {
+    width: auto;
+    padding: 0 8px;
+    gap: 5px;
+}
+
+.group-by-btn:has(.group-by-label:not(:empty)) .group-by-label {
+    display: inline;
+}
+
+.group-by-menu {
+    position: absolute;
+    top: calc(100% + 6px);
+    left: 0;
+    z-index: 200;
+    min-width: 140px;
+    background: var(--color-bg-surface);
+    border: 1px solid var(--color-border);
+    border-radius: 8px;
+    box-shadow: 0 4px 16px var(--color-shadow);
+    padding: 4px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.group-by-menu.hidden {
+    display: none;
+}
+
+.group-by-option {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 10px;
+    border: none;
+    background: transparent;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 0.85rem;
+    color: var(--color-text);
+    text-align: left;
+    width: 100%;
+}
+
+.group-by-option:hover {
+    background: var(--color-border);
+}
+
+.group-by-option.active {
+    color: var(--color-accent);
+    font-weight: 600;
+}

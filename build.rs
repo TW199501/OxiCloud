@@ -558,7 +558,7 @@ fn strip_esm_syntax(
             if !t.ends_with(';') && !t.contains(" from ") {
                 skipping = true; // multi-line import
             }
-            let aliases = collect_import_aliases(t);
+            let aliases = collect_import_aliases(t, declared_namespaces);
             if aliases.is_empty() {
                 out.push('\n');
             } else {
@@ -628,7 +628,9 @@ fn try_strip_export_prefix(line: &str) -> Option<String> {
 
 /// For `import { A, B as C, D as E } from '…'` return `"const C = B;\nconst E = D;"`.
 /// Returns an empty string when there are no aliases.
-fn collect_import_aliases(stmt: &str) -> String {
+/// Aliases already present in `declared` are skipped; newly emitted aliases are
+/// inserted into `declared` so that subsequent files don't re-declare them.
+fn collect_import_aliases(stmt: &str, declared: &mut std::collections::HashSet<String>) -> String {
     let brace_start = match stmt.find('{') {
         Some(i) => i + 1,
         None => return String::new(),
@@ -645,6 +647,12 @@ fn collect_import_aliases(stmt: &str) -> String {
         if let Some(as_pos) = b.find(" as ") {
             let orig = b[..as_pos].trim();
             let alias = b[as_pos + 4..].trim();
+            // Already declared earlier in the bundle — skip to avoid
+            // `SyntaxError: Identifier already declared`.
+            if declared.contains(alias) {
+                continue;
+            }
+            declared.insert(alias.to_string());
             if !out.is_empty() {
                 out.push('\n');
             }

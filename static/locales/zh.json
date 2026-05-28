@@ -710,5 +710,16 @@
         "colSharedBy": "共享者",
         "colDate": "共享日期",
         "colPermissions": "权限"
+    },
+    "groupby": {
+        "none": "无",
+        "title": "分组方式",
+        "owner": "所有者",
+        "shareDate": "分享日期"
+    },
+    "dateBucket": {
+        "today": "今天",
+        "last7days": "近7天",
+        "last30days": "近30天"
     }
 }

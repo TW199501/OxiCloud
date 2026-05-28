@@ -710,5 +710,16 @@
         "colSharedBy": "Partagé par",
         "colDate": "Date de partage",
         "colPermissions": "Permissions"
+    },
+    "groupby": {
+        "none": "Aucun",
+        "title": "Grouper par",
+        "owner": "Propriétaire",
+        "shareDate": "Date de partage"
+    },
+    "dateBucket": {
+        "today": "Aujourd'hui",
+        "last7days": "7 derniers jours",
+        "last30days": "30 derniers jours"
     }
 }

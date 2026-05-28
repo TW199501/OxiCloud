@@ -1,30 +1,6 @@
-/* Multi-Select – checkboxes & batch action bar */
-.list-header-checkbox,
-.file-item .checkbox-cell {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-}
-
-.list-header-checkbox input[type="checkbox"],
-.file-item .checkbox-cell input[type="checkbox"] {
-    width: 17px;
-    height: 17px;
-    cursor: pointer;
-    accent-color: var(--color-accent);
-    border-radius: 4px;
-}
-
-.list-header.selection-mode {
-    grid-template-columns: 36px 1fr;
-    background-color: var(--color-multiselect-bg);
-    color: var(--color-multiselect-text);
-    border-bottom-color: var(--color-multiselect-border);
-}
-
-.list-header.selection-mode .list-header-checkbox input[type="checkbox"] {
-    accent-color: var(--color-accent);
-}
+/* Multi-Select – batch action toolbar
+ * Per-item checkbox styles (.file-item .checkbox-cell, .list-header.selection-mode)
+ * live in resourceList.css alongside the item renderer. */
 
 .batch-selection-info {
     display: flex;

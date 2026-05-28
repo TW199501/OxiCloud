@@ -1,5 +1,5 @@
-import { test, expect } from '@playwright/test';
-import { goToLoginPage, loginAsAdmin, TEST_ADMIN } from './helpers';
+import { expect } from '@playwright/test';
+import { test, goToLoginPage, loginAsAdmin, TEST_ADMIN } from './helpers';
 
 test('has OxiCloud title', async ({ page }) => {
   await page.goto('/');

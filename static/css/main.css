@@ -13,7 +13,8 @@
 @import url("./components/breadcrumb.css");
 @import url("./components/buttons.css");
 @import url("./components/fileType.css");
-@import url("./components/filesView.css");
+@import url("./components/fileManager.css");
+@import url("./components/resourceList.css");
 @import url("./components/contextMenu.css");
 @import url("./components/dialogs.css");
 @import url("./components/modals.css");
@@ -24,7 +25,7 @@
 @import url("./components/notifications.css");
 @import url("./components/userMenu.css");
 @import url("./components/languageSelector.css");
-@import url("./components/multiSelect.css");
+@import url("./components/batchToolbar.css");
 @import url("./components/spinner.css");
 @import url("./components/search.css");
 @import url("./components/icons.css");

@@ -16,9 +16,9 @@ import { i18n } from '../../core/i18n.js';
 import { favorites } from '../library/favorites.js';
 import { musicView } from '../library/music.js';
 import { fileSharing } from '../sharing/fileSharing.js';
+import { batchToolbar } from './batchToolbar.js';
 import { fileOps } from './fileOperations.js';
 import { inlineViewer } from './inlineViewer.js';
-import { multiSelect } from './multiSelect.js';
 import { wopiEditor } from './wopiEditor.js';
 
 /**
@@ -330,8 +330,8 @@ const contextMenus = {
 
         // Copy button handler
         copyConfirmBtn.addEventListener('click', async () => {
-            // Batch copy mode (from multiSelect)
-            if (app.moveDialogMode === 'batch' && multiSelect) {
+            // Batch copy mode (from batchToolbar)
+            if (app.moveDialogMode === 'batch' && batchToolbar) {
                 const targetId = app.selectedTargetFolderId;
                 const items = app.batchMoveItems || [];
 
@@ -341,10 +341,10 @@ const contextMenus = {
                 const result = await fileOps.batchCopy(fileIds, folderIds, targetId);
 
                 this.closeMoveDialog();
-                multiSelect.clear();
+                batchToolbar.clear();
                 loadFiles();
 
-                multiSelect.showBatchResult('copy', result);
+                batchToolbar.showBatchResult('copy', result);
                 return;
             }
 
@@ -363,8 +363,8 @@ const contextMenus = {
         });
 
         moveConfirmBtn.addEventListener('click', async () => {
-            // Batch move mode (from multiSelect)
-            if (app.moveDialogMode === 'batch' && multiSelect) {
+            // Batch move mode (from batchToolbar)
+            if (app.moveDialogMode === 'batch' && batchToolbar) {
                 const targetId = app.selectedTargetFolderId;
                 const items = app.batchMoveItems || [];
 
@@ -374,9 +374,9 @@ const contextMenus = {
                 const result = await fileOps.batchMove(fileIds, folderIds, targetId);
 
                 this.closeMoveDialog();
-                multiSelect.clear();
+                batchToolbar.clear();
                 loadFiles();
-                multiSelect.showBatchResult('move', result);
+                batchToolbar.showBatchResult('move', result);
 
                 return;
             }

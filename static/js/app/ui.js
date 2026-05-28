@@ -5,21 +5,14 @@
 
 // @ts-check
 
-import { shareModal } from '../components/shareModal.js';
-import { createUserVignette } from '../components/userVignette.js';
-import { escapeHtml, formatDateTime, formatFileSize } from '../core/formatters.js';
 import { i18n } from '../core/i18n.js';
 import { OxiIcons } from '../core/icons.js';
+import { batchToolbar } from '../features/files/batchToolbar.js';
 import { contextMenus } from '../features/files/contextMenus.js';
 import { fileOps } from '../features/files/fileOperations.js';
 import { inlineViewer } from '../features/files/inlineViewer.js';
-import { multiSelect } from '../features/files/multiSelect.js';
 import { wopiEditor } from '../features/files/wopiEditor.js';
-import { favorites } from '../features/library/favorites.js';
 import { recent } from '../features/library/recent.js';
-import { thumbnail } from '../features/thumbnail.js';
-import { grants } from '../model/grants.js';
-import { systemUsers } from '../model/systemUsers.js';
 import { loadFiles } from './filesView.js';
 import { updateHistory } from './main.js';
 import { activateFilesUI, switchToFilesSection, syncViewContainers } from './navigation.js';
@@ -424,8 +417,6 @@ const ui = {
      * Switch to grid view
      */
     switchToGridView() {
-        this._hydrateViewIfNeeded();
-
         app.currentView = 'grid';
         localStorage.setItem('oxicloud-view', 'grid');
 
@@ -436,8 +427,6 @@ const ui = {
      * Switch to list view
      */
     switchToListView() {
-        this._hydrateViewIfNeeded();
-
         app.currentView = 'list';
         localStorage.setItem('oxicloud-view', 'list');
 
@@ -457,32 +446,6 @@ const ui = {
             .forEach((cell) => {
                 cell.classList.toggle('hidden', !visible);
             });
-    },
-
-    /**
-     * Asynchronously fill every un-resolved `.owner-cell` in the current list with
-     * the display name for its `data-owner-id` attribute.
-     *
-     * Call this after `renderFiles()` / `renderFolders()` in sections where the owner
-     * column is visible. Idempotent: cells already stamped with `data-owner-resolved`
-     * are skipped (safe to call on each "Load more" page append).
-     *
-     * When the column is hidden nothing calls this function, so `systemUsers` is never
-     * touched and no address-book requests are issued.
-     *
-     * @returns {Promise<void>}
-     */
-    async resolveOwnerCells() {
-        const filesList = document.getElementById('files-list');
-        const cells = /** @type {NodeListOf<HTMLElement>} */ (filesList?.querySelectorAll('.owner-cell[data-owner-id]:not([data-owner-resolved])'));
-        if (!cells?.length) return;
-        systemUsers.prefetch(); // warm cache once (idempotent, fire-and-forget)
-        for (const cell of cells) {
-            const id = cell.dataset.ownerId;
-            cell.dataset.ownerResolved = '1';
-            if (!id) continue;
-            cell.replaceChildren(createUserVignette(id, 'list'));
-        }
     },
 
     /**
@@ -644,22 +607,6 @@ const ui = {
         }
     },
 
-    /* ================================================================
-     *  Data store + event delegation (replaces per-item listeners)
-     * ================================================================ */
-
-    /** @type {Map<string, FolderItem | FileItem>} item data keyed by id */
-    _items: new Map(),
-
-    /** @type {FolderItem[]} last rendered folder dataset */
-    _lastFolders: [],
-
-    /** @type {FileItem[]} last rendered file dataset */
-    _lastFiles: [],
-
-    /** @type {boolean} */
-    _delegationReady: false,
-
     _getActiveView() {
         if (app && app.currentView === 'list') return 'list';
         if (app && app.currentView === 'grid') return 'grid';
@@ -669,67 +616,15 @@ const ui = {
     },
 
     /**
-     * @param {FolderItem[]} folders
-     */
-    _renderFoldersToView(folders) {
-        if (!Array.isArray(folders) || folders.length === 0) return;
-        const target = document.getElementById('files-list');
-        if (!target) return;
-
-        const frag = document.createDocumentFragment();
-        for (const folder of folders) {
-            try {
-                frag.appendChild(this._createFolderItem(folder));
-            } catch (e) {
-                console.warn(`Error building folder item `, folder, `reason: `, e);
-            }
-        }
-        target.appendChild(frag);
-    },
-
-    /**
-     * @param {FileItem[]} files
-     */
-    _renderFilesToView(files) {
-        if (!Array.isArray(files) || files.length === 0) return;
-        const target = document.getElementById('files-list');
-        if (!target) return;
-
-        const frag = document.createDocumentFragment();
-        for (const file of files) {
-            try {
-                frag.appendChild(this._createFileItem(file));
-            } catch (e) {
-                console.warn(`Error building file item `, file, `reason: `, e);
-            }
-        }
-        target.appendChild(frag);
-    },
-
-    /**
-     * @param {any[]} arr
-     * @param {any} item
-     */
-    _upsertById(arr, item) {
-        if (!Array.isArray(arr) || !item?.id) return;
-        const idx = arr.findIndex((x) => x && x.id === item.id);
-        if (idx >= 0) {
-            arr[idx] = item;
-        } else {
-            arr.push(item);
-        }
-    },
-
-    /**
      * handle the drop
      * @param {string} action copy|move
      * @param {string} targetFolderId the target
      * @param {any} dataTransfer fallback if nothing is selected
      */
     async _dropToFolder(action, targetFolderId, dataTransfer) {
-        const selection = multiSelect.getSelection(targetFolderId);
+        const selection = batchToolbar.getSelection(targetFolderId);
 
-        multiSelect.clear();
+        batchToolbar.clear();
 
         if (selection.fileIds.length === 0 && selection.folderIds.length === 0) {
             // try to use dataTransfer (direct move without selection)
@@ -774,214 +669,38 @@ const ui = {
                 console.error(`drag and drop: action ${action} unknown`);
                 return;
         }
-        multiSelect.showBatchResult(action, result);
+        batchToolbar.showBatchResult(action, result);
         console.log(result);
     },
 
-    _hydrateViewIfNeeded() {
-        // Only hydrate if there is at least one rendered item in the opposite/current DOM.
-        // This prevents stale cache hydration in empty-state screens.
-        const hasAnyRenderedItem = !!document.querySelector('#files-list .file-item');
-        if (!hasAnyRenderedItem) return;
-
-        // FIXME: thre is the header...
-        const listView = document.getElementById('files-list');
-        if (!listView) return;
-        if (listView.children.length > 1) return;
-
-        this._renderFoldersToView(this._lastFolders);
-        this._renderFilesToView(this._lastFiles);
-    },
-
     /**
-     * Attach a fixed set of delegated event listeners to the two
-     * container elements (files-list).
-     * Called once – idempotent.
+     * Attach delegated drag-and-drop listeners to a files-list container.
+     * Called once by `filesView.js` after the `ResourceListComponent` is created.
+     * Idempotent — a second call on the same element is a no-op.
+     *
+     * Handles:
+     *   - `dragstart` / `dragend` — visual preview + dataTransfer payload
+     *   - `dragover` / `dragleave` / `drop` — folder drop targets (delegated)
+     *
+     * @param {HTMLElement} container  The `#files-list` element.
      */
-    initDelegation() {
-        if (this._delegationReady) return;
-        const filesList = document.getElementById('files-list');
-        if (!filesList) return;
-        this._delegationReady = true;
+    initDragDrop(container) {
+        if (container.dataset.dragDropReady) return;
+        container.dataset.dragDropReady = '1';
 
-        // ── helpers ────────────────────────────────────────────────
-        /** @param {HTMLDivElement} card */
+        // ── helpers ────────────────────────────────────────────────────────
+        /** @param {HTMLElement} card */
         const itemInfo = (card) => {
             if (!card) return null;
             const fileId = card.dataset.fileId;
-            if (fileId)
-                return {
-                    type: 'file',
-                    id: fileId,
-                    name: card.dataset.fileName,
-                    data: this._items.get(fileId)
-                };
+            if (fileId) return { type: 'file', id: fileId, name: card.dataset.fileName ?? '' };
             const folderId = card.dataset.folderId;
-            if (folderId)
-                return {
-                    type: 'folder',
-                    id: folderId,
-                    name: card.dataset.folderName,
-                    data: this._items.get(folderId)
-                };
+            if (folderId) return { type: 'folder', id: folderId, name: card.dataset.folderName ?? '' };
             return null;
         };
 
-        /** @param {FileItem} file */
-        const openFile = async (file) => {
-            if (!file) return;
-            if (recent) {
-                document.dispatchEvent(new CustomEvent('file-accessed', { detail: { file } }));
-            }
-            // WOPI editor intercept: open Office documents in the WOPI editor
-            // But NOT image files - those should be previewed in the inline viewer
-            const ext = (file.name || '').split('.').pop().toLowerCase();
-            const imageExts = ['jpg', 'jpeg', 'png', 'gif', 'svg', 'webp', 'bmp', 'ico', 'heic', 'heif', 'avif', 'tiff'];
-            const isImage = file.mime_type?.startsWith('image/') || imageExts.includes(ext);
-            try {
-                if (!isImage && wopiEditor && (await wopiEditor.canEdit(file.name))) {
-                    await wopiEditor.openInModal(file.id, file.name, 'edit');
-                    return;
-                }
-            } catch (e) {
-                console.warn(`WOPI Editor failed, falling bck to classic view `, e);
-            }
-
-            if (this.isViewableFile(file) || isImage) {
-                if (inlineViewer) {
-                    inlineViewer.openFile(file);
-                    // update history
-                    app.viewFile = file.id;
-                    updateHistory(false);
-                } else {
-                    fileOps.downloadFile(file.id, file.name);
-                }
-            } else {
-                fileOps.downloadFile(file.id, file.name);
-            }
-        };
-
-        /** @param {HTMLElement} card */
-        const navigateFolder = (card) => {
-            const folderId = card.dataset.folderId;
-            const folderName = card.dataset.folderName;
-            if (app.currentSection === 'favorites' || app.currentSection === 'recent') {
-                switchToFilesSection();
-                app.currentPath = folderId;
-                loadFiles();
-                return;
-            }
-            if (app.currentSection === 'sharedwithme') {
-                // Activate Files UI (nav, breadcrumb, actions bar) without
-                // resetting the path — the shared folder becomes the entry point.
-                activateFilesUI();
-            }
-            app.breadcrumbPath.push({ id: folderId, name: folderName });
-            app.currentPath = folderId;
-            this.updateBreadcrumb();
-            loadFiles();
-        };
-
-        /**
-         * @param {HTMLElement} card
-         * @param {{ type: string, id: string, name: string | undefined, data: FolderItem | FileItem | undefined }} info
-         */
-        const setContextTarget = (card, info) => {
-            if (info.type === 'folder') {
-                app.contextMenuTargetFolder = /** @type {FolderItem} */ ({
-                    id: info.id,
-                    name: card.dataset.folderName,
-                    parent_id: card.dataset.parentId || ''
-                });
-            } else {
-                const fileData = /** @type {FileItem | undefined} */ (info.data || this._items.get(info.id));
-                app.contextMenuTargetFile = /** @type {FileItem} */ ({
-                    id: info.id,
-                    name: card.dataset.fileName,
-                    folder_id: card.dataset.folderId || '',
-                    mime_type: fileData?.mime_type || null
-                });
-            }
-        };
-
-        // ──  click (open / navigate; select only via checkbox) ──
-        filesList.addEventListener('click', (e) => {
-            const card = /** @type {HTMLDivElement | null} */ (/** @type {HTMLElement} */ (e.target).closest('.file-item'));
-            if (!card) return;
-
-            if (/** @type {HTMLElement} */ (e.target).closest('.file-actions')) {
-                e.stopPropagation();
-                e.preventDefault();
-                const info = itemInfo(card);
-                if (!info) return;
-                setContextTarget(card, info);
-                const menuId = info.type === 'folder' ? 'folder-context-menu' : 'file-context-menu';
-                showContextMenuAtElement(/** @type {HTMLElement} */ (e.target).closest('.file-actions'), menuId);
-                return;
-            }
-
-            if (/** @type {HTMLElement} */ (e.target).closest('.checkbox-cell')) {
-                toggleCardSelection(card, e);
-                return;
-            }
-
-            // Favorite star – handled by direct onclick on the button
-            if (/** @type {HTMLElement} */ (e.target).closest('.favorite-star')) return;
-
-            // Single-click opens/navigates (selection is only via checkbox)
-            const info = itemInfo(card);
-            if (!info) return;
-
-            // use modifier key to select/deselect item
-            // note: shift key is used in multiselect
-            // note: on MacOS, ctrl Key is used to convert click into right click, which invoke the `contextmenu` event
-            if (e.metaKey || e.altKey || e.ctrlKey) {
-                toggleCardSelection(card, e);
-                return;
-            }
-
-            // shiftkey is used to complete selection
-            if (e.shiftKey && multiSelect) {
-                multiSelect.handleToggleItem(card, e);
-                return;
-            }
-
-            if (info.type === 'folder') {
-                navigateFolder(card);
-            } else {
-                openFile(/** @type {FileItem} */ (info.data));
-            }
-        });
-
-        // ── GRID: dblclick (navigate / open) ──────────────────────
-        filesList.addEventListener('dblclick', (e) => {
-            // Single-click already handles open/navigate.
-            // Prevent duplicate actions on double-click.
-            e.preventDefault();
-        });
-
-        // ── shared events ──────────────────────
-
-        filesList.addEventListener('contextmenu', (e) => {
-            const card = /** @type {HTMLDivElement | null} */ (/** @type {HTMLElement} */ (e.target).closest('.file-item'));
-            if (!card) return;
-            e.preventDefault();
-            const info = itemInfo(card);
-            if (!info) return;
-            setContextTarget(card, info);
-            const menuId = info.type === 'folder' ? 'folder-context-menu' : 'file-context-menu';
-            const menu = document.getElementById(menuId);
-            contextMenus.sync();
-
-            if (menu) {
-                menu.style.left = `${e.pageX}px`;
-                menu.style.top = `${e.pageY}px`;
-                menu.classList.remove('hidden');
-            }
-        });
-
-        // dragstart
-        filesList.addEventListener('dragstart', (e) => {
+        // ── dragstart ──────────────────────────────────────────────────────
+        container.addEventListener('dragstart', (e) => {
             const card = /** @type {HTMLDivElement | null} */ (/** @type {HTMLElement} */ (e.target).closest('.file-item'));
             if (!card) {
                 e.preventDefault();
@@ -993,208 +712,233 @@ const ui = {
                 e.preventDefault();
                 return;
             }
-
             if (!e.dataTransfer) return;
 
             e.dataTransfer.setData('text/plain', info.id);
-            if (info.type === 'folder') {
-                e.dataTransfer.setData('application/oxicloud-folder', 'true');
-            }
-            // allow copy or move (handled by the browser)
+            if (info.type === 'folder') e.dataTransfer.setData('application/oxicloud-folder', 'true');
             e.dataTransfer.effectAllowed = 'copyMove';
 
             this.draggedItems = document.createElement('div');
             this.draggedItems.className = 'dragged-items';
 
-            let selectedCardFromList = filesList.querySelectorAll(`div.selected > div.name-cell`);
-            if (selectedCardFromList.length === 0) {
-                // fallback to current element
-                selectedCardFromList = card.querySelectorAll('div.name-cell');
-            }
+            let selectedCards = container.querySelectorAll('div.selected > div.name-cell');
+            if (selectedCards.length === 0) selectedCards = card.querySelectorAll('div.name-cell');
 
-            let index = 0;
             const maxElements = 4;
             let lastItemDiv = null;
+            let index = 0;
 
-            while (index < selectedCardFromList.length && index < maxElements) {
+            while (index < selectedCards.length && index < maxElements) {
                 const iconCell = document.createElement('div');
-                const icon = selectedCardFromList[index].getElementsByClassName('file-icon').item(0)?.cloneNode(true);
+                const icon = selectedCards[index].getElementsByClassName('file-icon').item(0)?.cloneNode(true);
                 if (icon) {
                     iconCell.appendChild(icon);
-                    iconCell.querySelectorAll('img')?.forEach((img) => {
+                    iconCell.querySelectorAll('img').forEach((img) => {
                         img.loading = 'eager';
                     });
                 }
-
                 const nameCell = document.createElement('div');
-                const name = selectedCardFromList[index].getElementsByTagName('span').item(0)?.cloneNode(true);
-                if (name) {
-                    nameCell.appendChild(name);
-                }
+                const name = selectedCards[index].getElementsByTagName('span').item(0)?.cloneNode(true);
+                if (name) nameCell.appendChild(name);
 
                 const div = document.createElement('div');
                 div.className = 'file-item';
                 div.appendChild(iconCell);
                 div.appendChild(nameCell);
-
                 this.draggedItems.appendChild(div);
-                index += 1;
                 lastItemDiv = div;
+                index += 1;
             }
 
-            let downloadUrl;
             let nameEncoded;
-
-            // tells Browser URL to call to drop selection on operating system (desktop, file manager etc)
-            // will generate a zipfile if multiple
-            if (selectedCardFromList.length === 1) {
-                // only 1 file
+            let downloadUrl;
+            if (selectedCards.length === 1) {
                 if (info.type === 'file') {
-                    nameEncoded = info.name.replaceAll(/:/g, '-'); // issue is that DownloadURL is using : as separator;
+                    nameEncoded = info.name.replaceAll(/:/g, '-');
                     downloadUrl = `${window.location.origin}/api/files/${info.id}`;
                 } else {
-                    // directory into ZIP
                     nameEncoded = info.name.replaceAll(/:/g, '-').concat('.zip');
                     downloadUrl = `${window.location.origin}/api/folders/${info.id}/download?format=zip`;
                 }
             } else {
-                // must use ZIP container
-                // TODO better naming like ("selection in ${parent.name}") modulo i18n ? ...
-                const now = new Date().toISOString().replace(/T/, ' ').replace(/\.*/, '').replaceAll(/:/g, '-');
+                const now = new Date().toISOString().replace(/T/, ' ').replace(/\..*/, '').replaceAll(/:/g, '-');
                 nameEncoded = `oxicloud ${now}.zip`;
-                /** @type {string[]} */
-                const folders = [];
-                /** @type {string[]} */
-                const files = [];
-                /** @type {NodeListOf<HTMLDivElement>} */ (filesList.querySelectorAll(`div.selected`)).forEach((e) => {
-                    const item = itemInfo(e);
-                    if (item.type === 'file') {
-                        files.push(item.id);
-                    } else {
-                        folders.push(item.id);
-                    }
+                /** @type {string[]} */ const folderIds = [];
+                /** @type {string[]} */ const fileIds = [];
+                /** @type {NodeListOf<HTMLDivElement>} */ (container.querySelectorAll('div.selected')).forEach((el) => {
+                    const item = itemInfo(/** @type {HTMLElement} */ (el));
+                    if (item?.type === 'file') fileIds.push(item.id);
+                    else if (item) folderIds.push(item.id);
                 });
-                downloadUrl = `${window.location.origin}/api/batch/download?file_ids=${files.join(',')}&folder_ids=${folders.join(',')}`;
+                downloadUrl = `${window.location.origin}/api/batch/download?file_ids=${fileIds.join(',')}&folder_ids=${folderIds.join(',')}`;
             }
 
-            e.dataTransfer?.setData('DownloadURL', `application/octet-stream:${nameEncoded}:${downloadUrl}`);
+            e.dataTransfer.setData('DownloadURL', `application/octet-stream:${nameEncoded}:${downloadUrl}`);
 
-            // if more than 1 item, display the badge
-            if (selectedCardFromList.length > 1) {
+            if (selectedCards.length > 1) {
                 const badge = document.createElement('span');
                 badge.className = 'dragged-items-badge';
-                badge.innerText = `${selectedCardFromList.length}`;
+                badge.innerText = `${selectedCards.length}`;
                 this.draggedItems.appendChild(badge);
             }
+            if (selectedCards.length > maxElements) lastItemDiv?.classList.add('fading');
 
-            // if more than maxElements display the fading
-            if (selectedCardFromList.length > maxElements) {
-                lastItemDiv?.classList.add('fading');
-            }
-
-            this.dragPreview.appendChild(this.draggedItems);
+            this.dragPreview?.appendChild(this.draggedItems);
             e.dataTransfer.setDragImage(this.draggedItems, 0, 0);
         });
 
-        // dragend
-        filesList.addEventListener('dragend', (_e) => {
-            this.dragPreview.removeChild(this.draggedItems);
+        // ── dragend ────────────────────────────────────────────────────────
+        container.addEventListener('dragend', () => {
+            if (this.draggedItems && this.dragPreview?.contains(this.draggedItems)) {
+                this.dragPreview.removeChild(this.draggedItems);
+            }
             document.querySelectorAll('.drop-target').forEach((el) => {
                 el.classList.remove('drop-target');
             });
         });
 
-        // dragover – only folders are valid drop targets
-        filesList.addEventListener('dragover', (e) => {
+        // ── dragover — only folder cards are valid drop targets ────────────
+        container.addEventListener('dragover', (e) => {
             const card = /** @type {HTMLElement} */ (/** @type {HTMLElement} */ (e.target).closest('.file-item'));
-            if (!card || card.dataset.fileId) return;
-            if (!card.dataset.folderId) return;
+            if (!card || card.dataset.fileId || !card.dataset.folderId) return;
             e.preventDefault();
             card.classList.add('drop-target');
         });
 
-        // dragleave
-        filesList.addEventListener('dragleave', (e) => {
+        // ── dragleave ──────────────────────────────────────────────────────
+        container.addEventListener('dragleave', (e) => {
             const card = /** @type {HTMLElement} */ (/** @type {HTMLElement} */ (e.target).closest('.file-item'));
             if (!card || card.dataset.fileId) return;
             card.classList.remove('drop-target');
         });
 
-        // drop – only folders accept drops
-        filesList.addEventListener('drop', async (e) => {
+        // ── drop ───────────────────────────────────────────────────────────
+        container.addEventListener('drop', async (e) => {
             const card = /** @type {HTMLElement} */ (/** @type {HTMLElement} */ (e.target).closest('.file-item'));
-            if (!card || card.dataset.fileId) return;
-            const targetFolderId = card.dataset.folderId;
-            if (!targetFolderId) return;
-
+            if (!card || card.dataset.fileId || !card.dataset.folderId) return;
             e.preventDefault();
             card.classList.remove('drop-target');
-
             if (!e.dataTransfer) return;
-            const action = e.dataTransfer.dropEffect;
-            await this._dropToFolder(action, targetFolderId, e.dataTransfer);
+            await this._dropToFolder(e.dataTransfer.dropEffect, card.dataset.folderId, e.dataTransfer);
         });
     },
 
     /* ================================================================
-     *  Favorite star helper – attaches a direct click handler to a
-     *  star <button> so the event never bubbles to the card.
+     *  Item open / navigate — shared by ui.js delegation and component
+     *  callbacks so the same logic fires regardless of which view renders
+     *  the items.
      * ================================================================ */
-    /** @param {HTMLElement} el */
-    _bindStarClick(el) {
-        const star = el.querySelector('.favorite-star');
-        star?.addEventListener('click', (e) => {
-            e.stopPropagation();
-            e.stopImmediatePropagation();
-            e.preventDefault();
 
-            if (!favorites) return;
-
-            // FIXME: make a function
-            const itemElement = /** @type {HTMLElement | null} */ (shared?.closest('.file-item'));
-            if (!itemElement) return;
-
-            const itemId = itemElement.dataset.fileId ? itemElement.dataset.fileId : itemElement.dataset.folderId;
-            const itemType = itemElement.dataset.fileId ? 'file' : 'folder';
-            const itemName = itemElement.dataset.fileId ? itemElement.dataset.fileName : itemElement.dataset.folderName;
-
-            const isActive = star.classList.contains('active');
-
-            if (isActive) {
-                this.setFavoriteVisualState(itemId, itemType, false);
-                favorites.removeFromFavorites(itemId, itemType);
-            } else {
-                this.setFavoriteVisualState(itemId, itemType, true);
-                favorites.addToFavorites(itemId, itemName, itemType, null);
+    /**
+     * Open a file: dispatch a recent-access event, try WOPI, fall back to
+     * inline viewer or download.
+     * @param {FileItem} file
+     */
+    async _openFile(file) {
+        if (!file) return;
+        if (recent) {
+            document.dispatchEvent(new CustomEvent('file-accessed', { detail: { file } }));
+        }
+        // WOPI editor intercept: open Office documents in the WOPI editor
+        // But NOT image files - those should be previewed in the inline viewer
+        const ext = (file.name || '').split('.').pop().toLowerCase();
+        const imageExts = ['jpg', 'jpeg', 'png', 'gif', 'svg', 'webp', 'bmp', 'ico', 'heic', 'heif', 'avif', 'tiff'];
+        const isImage = file.mime_type?.startsWith('image/') || imageExts.includes(ext);
+        try {
+            if (!isImage && wopiEditor && (await wopiEditor.canEdit(file.name))) {
+                await wopiEditor.openInModal(file.id, file.name, 'edit');
+                return;
             }
+        } catch (e) {
+            console.warn(`WOPI Editor failed, falling back to classic view`, e);
+        }
+        if (this.isViewableFile(file) || isImage) {
+            if (inlineViewer) {
+                inlineViewer.openFile(file);
+                app.viewFile = file.id;
+                updateHistory(false);
+            } else {
+                fileOps.downloadFile(file.id, file.name);
+            }
+        } else {
+            fileOps.downloadFile(file.id, file.name);
+        }
+    },
 
-            // Keep context-menu label in sync if available
-            contextMenus.syncFavoriteOptionLabels();
-        });
+    /**
+     * Navigate into a folder, handling section transitions (SharedWithMe,
+     * Favorites, Recent → Files).
+     * @param {string|undefined} folderId
+     * @param {string|undefined} folderName
+     */
+    _navigateToFolder(folderId, folderName) {
+        if (!folderId) return;
+        if (app.currentSection === 'favorites' || app.currentSection === 'recent') {
+            switchToFilesSection();
+            app.currentPath = folderId;
+            loadFiles();
+            return;
+        }
+        if (app.currentSection === 'sharedwithme') {
+            // Activate Files UI (nav, breadcrumb, actions bar) without
+            // resetting the path — the shared folder becomes the entry point.
+            activateFilesUI();
+        }
+        app.breadcrumbPath.push({ id: folderId, name: folderName || '' });
+        app.currentPath = folderId;
+        this.updateBreadcrumb();
+        loadFiles();
+    },
 
-        const shared = el.querySelector('.file-badge-shared');
-        shared?.addEventListener('click', (e) => {
-            e.stopPropagation();
-            e.stopImmediatePropagation();
-            e.preventDefault();
+    /**
+     * Open a file or navigate into a folder.
+     * Used as the `onOpen` callback for `ResourceListComponent`.
+     * @param {FileItem|FolderItem} item
+     */
+    async openItem(item) {
+        if ('mime_type' in item) {
+            await this._openFile(/** @type {FileItem} */ (item));
+        } else {
+            const folder = /** @type {FolderItem} */ (item);
+            this._navigateToFolder(folder.id, folder.name);
+        }
+    },
 
-            // FIXME: make a function
-            const itemElement = /** @type {HTMLElement | null} */ (shared?.closest('.file-item'));
-            if (!itemElement) return;
-
-            const itemId = itemElement.dataset.fileId ? itemElement.dataset.fileId : itemElement.dataset.folderId;
-            const itemType = itemElement.dataset.fileId ? 'file' : 'folder';
-            const itemName = itemElement.dataset.fileId ? itemElement.dataset.fileName : itemElement.dataset.folderName;
-
-            const item = /** @type {FileItem|FolderItem} */ (
-                /** @type {unknown} */ ({
-                    id: itemId,
-                    name: itemName
-                })
-            );
-
-            shareModal.open(item, /** @type {'file'|'folder'} */ (itemType));
-        });
+    /**
+     * Set the context-menu target and show the appropriate menu.
+     * Used as the `onContextMenu` callback for `ResourceListComponent`.
+     * @param {FileItem|FolderItem} item
+     * @param {MouseEvent}          e
+     */
+    showContextMenuForItem(item, e) {
+        const trigger = /** @type {HTMLElement | null} */ (/** @type {HTMLElement} */ (e.target).closest('.file-actions'));
+        if ('mime_type' in item) {
+            app.contextMenuTargetFile = /** @type {FileItem} */ (item);
+            if (trigger) {
+                showContextMenuAtElement(trigger, 'file-context-menu');
+            } else {
+                const menu = document.getElementById('file-context-menu');
+                if (menu) {
+                    menu.style.left = `${e.pageX}px`;
+                    menu.style.top = `${e.pageY}px`;
+                    contextMenus.sync();
+                    menu.classList.remove('hidden');
+                }
+            }
+        } else {
+            app.contextMenuTargetFolder = /** @type {FolderItem} */ (item);
+            if (trigger) {
+                showContextMenuAtElement(trigger, 'folder-context-menu');
+            } else {
+                const menu = document.getElementById('folder-context-menu');
+                if (menu) {
+                    menu.style.left = `${e.pageX}px`;
+                    menu.style.top = `${e.pageY}px`;
+                    contextMenus.sync();
+                    menu.classList.remove('hidden');
+                }
+            }
+        }
     },
 
     /**
@@ -1259,122 +1003,13 @@ const ui = {
      *  Element-creation helpers
      * ================================================================ */
 
-    /**
-     * Create a list row for a folder
-     * @param {FolderItem} folder
-     */
-    _createFolderItem(folder) {
-        const el = document.createElement('div');
-        el.className = 'file-item';
-        el.dataset.folderId = folder.id;
-        el.dataset.folderName = folder.name;
-        el.dataset.parentId = folder.parent_id || '';
-        if (folder.path) el.dataset.path = folder.path;
-
-        const isFav = favorites?.isFavorite(folder.id, 'folder');
-        const isShared = grants.getOutgoingGrantsFor('folder', folder.id).length > 0; //sharedView.isShared(folder.id, 'folder');
-        const formattedDate = formatDateTime(folder.modified_at);
-
-        el.innerHTML = `
-            <div class="checkbox-cell"><input type="checkbox" class="item-checkbox"></div>
-            <div class="name-cell">
-                <div class="file-icon folder-icon">
-                    <i class="fas fa-folder"></i>
-                </div>
-                <span>${escapeHtml(folder.name)}</span>
-                <div class="file-badge file-badge-favorite ${isFav ? '' : 'hidden'}"><i class="fas fa-star favorite-star-inline"></i></div>
-                <div class="file-badge file-badge-shared ${isShared ? '' : 'hidden'}"><i class="fas fa-oxiexport"></i></div>
-            </div>
-            <div class="owner-cell${this._ownerVisible ? '' : ' hidden'}" data-owner-id="${escapeHtml(folder.owner_id || '')}"></div>
-            <div class="type-cell">${i18n.t('files.file_types.folder')}</div>
-            <div class="size-cell">--</div>
-            <div class="date-cell">${formattedDate}</div>
-            <div class="action-cell">
-                <button class="favorite-star${isFav ? ' active' : ''}">
-                    <i class="${isFav ? 'fas' : 'far'} fa-star"></i>
-                </button>
-                <button class="file-actions"><i class="fas fa-ellipsis-v"></i></button>
-            </div>
-        `;
-
-        if (app.currentPath !== '') {
-            el.setAttribute('draggable', 'true');
-        }
-        this._bindStarClick(el);
-        return el;
-    },
-
-    /**
-     * Create a grid card for a file
-     * @param {FileItem} file
-     */
-    _createFileItem(file) {
-        const iconClass = file.icon_class || this.getIconClass(file.name);
-        const iconSpecialClass = file.icon_special_class || this.getIconSpecialClass(file.name);
-        const cat = file.category || '';
-        const typeLabel = cat ? i18n.t(`files.file_types.${cat.toLowerCase()}`) || cat : i18n.t('files.file_types.document');
-        const fileSize = file.size_formatted || formatFileSize(file.size);
-        const formattedDate = formatDateTime(file.modified_at);
-        const isFav = favorites?.isFavorite(file.id, 'file');
-        const isShared = grants.getOutgoingGrantsFor('file', file.id).length > 0;
-        //const isShared = sharedView.isShared(file.id, 'file');
-        const canThumbnail = thumbnail.canHandle(file);
-
-        const el = document.createElement('div');
-        el.className = 'file-item';
-        el.dataset.fileId = file.id;
-        el.dataset.fileName = file.name;
-        el.dataset.folderId = file.folder_id || '';
-        if (file.path) el.dataset.path = file.path;
-        el.setAttribute('draggable', 'true');
-
-        el.innerHTML = `
-
-            <div class="checkbox-cell"><input type="checkbox" class="item-checkbox"></div>
-            <div class="name-cell">
-                <div class="file-icon ${iconSpecialClass}">
-                    ${canThumbnail ? `<img class="file-thumb" src="/api/files/${file.id}/thumbnail/icon" loading="lazy" alt="">` : ''}
-                    <i class="${iconClass}"></i>
-                </div>
-                <span>${escapeHtml(file.name)}</span>
-                <div class="file-badge file-badge-favorite ${isFav ? '' : 'hidden'}"><i class="fas fa-star favorite-star-inline"></i></div>
-                <div class="file-badge file-badge-shared ${isShared ? '' : 'hidden'}"><i class="fas fa-oxiexport"></i></div>
-            </div>
-            <div class="owner-cell${this._ownerVisible ? '' : ' hidden'}" data-owner-id="${escapeHtml(file.owner_id || '')}"></div>
-            <div class="type-cell">${typeLabel}</div>
-            <div class="size-cell">${fileSize}</div>
-            <div class="date-cell">${formattedDate}</div>
-            <div class="action-cell">
-                <button class="favorite-star${isFav ? ' active' : ''}">
-                    <i class="${isFav ? 'fas' : 'far'} fa-star"></i>
-                </button>
-                <button class="file-actions"><i class="fas fa-ellipsis-v"></i></button>
-            </div>
-        `;
-        var thumb = /** @type {HTMLImageElement} */ (el.querySelector('.file-thumb'));
-        if (thumb) {
-            thumb.addEventListener('error', () => {
-                console.log(`thumbnail not found for "${file.name}", try to generate it...`);
-                thumb.classList.add('hidden');
-                thumbnail.queueGenerate(file, (dataUrl) => {
-                    thumb.src = dataUrl;
-                    thumb.classList.remove('hidden');
-                });
-            });
-        }
-        this._bindStarClick(el);
-        return el;
-    },
-
-    /* ================================================================
-     *  Batch rendering with DocumentFragment
-     * ================================================================ */
-
     resetFilesList() {
         const filesList = document.getElementById('files-list');
         const filesContainerError = document.getElementById('files-container-error');
 
         if (!filesList) return;
+        // Let ui.js delegation handle this container again
+        delete filesList.dataset.managedBy;
 
         filesList.innerHTML = `
             <div class="list-header">
@@ -1415,96 +1050,6 @@ const ui = {
 
         filesContainerError?.classList.remove('hidden');
         filesList?.classList.add('hidden');
-    },
-
-    /**
-     * Render an array of folders into both grid and list views
-     * using DocumentFragment for minimal reflows.
-     *
-     * @param {FolderItem[]} folders
-     */
-    renderFolders(folders) {
-        if (!this._delegationReady) this.initDelegation();
-        const safeFolders = Array.isArray(folders) ? folders : [];
-        this._lastFolders = safeFolders.slice();
-
-        for (const folder of safeFolders) {
-            this._items.set(folder.id, folder);
-        }
-
-        this._renderFoldersToView(safeFolders);
-    },
-
-    /**
-     * Render an array of files into both grid and list views
-     * using DocumentFragment for minimal reflows.
-     * @param {FileItem[]} files
-     */
-    renderFiles(files) {
-        if (!this._delegationReady) this.initDelegation();
-        const safeFiles = Array.isArray(files) ? files : [];
-        this._lastFiles = safeFiles.slice();
-
-        for (const file of safeFiles) {
-            this._items.set(file.id, file);
-        }
-
-        this._renderFilesToView(safeFiles);
-    },
-
-    /* ================================================================
-     *  Single-item add (backward-compatible API for post-upload, etc.)
-     * ================================================================ */
-
-    /**
-     * Add a single folder to the active view.
-     * @param {FolderItem} folder
-     */
-    addFolderToView(folder) {
-        if (!this._delegationReady) this.initDelegation();
-
-        // Duplicate guard
-        if (document.querySelector(`.file-item[data-folder-id="${folder.id}"]`)) {
-            console.log(`Folder ${folder.name} (${folder.id}) already exists in the view, not duplicating`);
-            return;
-        }
-
-        this._clearEmptyState();
-        this._items.set(folder.id, folder);
-        this._upsertById(this._lastFolders, folder);
-        this._renderFoldersToView([folder]);
-    },
-
-    /**
-     * Add a single file to the active view.
-     * @param {FileItem} file
-     */
-    addFileToView(file) {
-        if (!this._delegationReady) this.initDelegation();
-
-        // Duplicate guard
-        if (document.querySelector(`.file-item[data-file-id="${file.id}"]`)) {
-            console.log(`File ${file.name} (${file.id}) already exists in the view, not duplicating`);
-            return;
-        }
-
-        this._clearEmptyState();
-        this._items.set(file.id, file);
-        this._upsertById(this._lastFiles, file);
-        this._renderFilesToView([file]);
-    },
-
-    /**
-     * If the empty-state placeholder is showing, switch back to the file list.
-     * Called before adding any new item so the card is not appended to a hidden list.
-     */
-    _clearEmptyState() {
-        const filesList = document.getElementById('files-list');
-        const filesContainerError = document.getElementById('files-container-error');
-        if (filesList?.classList.contains('hidden')) {
-            filesList.classList.remove('hidden');
-            filesContainerError?.classList.add('hidden');
-        }
     }
 };
 
@@ -1512,13 +1057,13 @@ const ui = {
 
 /**
  * Toggle selection state of a file/folder card.
- * Routes through the multiSelect module so batch actions know about selected items.
+ * Routes through the batchToolbar module so batch actions know about selected items.
  * @param {HTMLDivElement} card
  * @param {MouseEvent} event
  */
 function toggleCardSelection(card, event) {
-    if (multiSelect) {
-        multiSelect.handleToggleItem(card, event);
+    if (batchToolbar) {
+        batchToolbar.handleToggleItem(card, event);
     } else {
         card.classList.toggle('selected');
     }
@@ -1641,17 +1186,17 @@ function initRubberBandSelection() {
             if (intersects) {
                 card.classList.add('selected');
 
-                // Sync with multiSelect module
-                if (multiSelect) {
-                    const info = multiSelect._extractInfo(/** @type {HTMLDivElement} */ (card));
-                    if (info) multiSelect.select(info.id, info.name, info.type, info.parentId);
+                // Sync with batchToolbar module
+                if (batchToolbar) {
+                    const info = batchToolbar._extractInfo(/** @type {HTMLDivElement} */ (card));
+                    if (info) batchToolbar.select(info.id, info.name, info.type, info.parentId);
                 }
             } else {
                 card.classList.remove('selected');
-                // Deselect from multiSelect module
-                if (multiSelect) {
-                    const info = multiSelect._extractInfo(/** @type {HTMLDivElement} */ (card));
-                    if (info) multiSelect.deselect(info.id);
+                // Deselect from batchToolbar module
+                if (batchToolbar) {
+                    const info = batchToolbar._extractInfo(/** @type {HTMLDivElement} */ (card));
+                    if (info) batchToolbar.deselect(info.id);
                 }
             }
         });
@@ -1663,7 +1208,7 @@ function initRubberBandSelection() {
         const hadSelection = selRect.style.display === 'block';
         selRect.style.display = 'none';
         // Update the batch bar after rubber band selection completes
-        if (multiSelect) multiSelect._syncUI();
+        if (batchToolbar) batchToolbar._syncUI();
         // Suppress the click event that follows mouseup so the global
         // deselect handler doesn't immediately clear the selection.
         if (hadSelection) {

@@ -710,5 +710,16 @@
         "colSharedBy": "공유한 사람",
         "colDate": "공유 날짜",
         "colPermissions": "권한"
+    },
+    "groupby": {
+        "none": "없음",
+        "title": "그룹화 기준",
+        "owner": "소유자",
+        "shareDate": "공유 날짜"
+    },
+    "dateBucket": {
+        "today": "오늘",
+        "last7days": "최근 7일",
+        "last30days": "최근 30일"
     }
 }

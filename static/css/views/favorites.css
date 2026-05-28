@@ -31,37 +31,15 @@
     text-shadow: 0 0 5px var(--color-warning-shadow);
 }
 
-/* Styles for the favorites view items */
+/* Item modifier rules (.file-item.favorite-item) → resourceList.css */
+
 .favorite-item {
     position: relative;
 }
 
-/* Adjustments for grid view */
-.file-item.favorite-item {
-    border-left: 3px solid var(--color-warning-border);
-
-    [dir="rtl"] & {
-        border-right: 3px solid var(--color-warning-border);
-        border-left: unset;
-    }
-}
-
-/* Adjustments for list view */
+/* Adjustments for list view header (page-level, not item-level) */
 .list-header.favorites-header {
     grid-template-columns: 30px minmax(200px, 2fr) 1fr 1fr 120px;
-}
-
-.file-item.favorite-item {
-    position: relative;
-    grid-template-columns: 30px minmax(200px, 2fr) 1fr 1fr 120px;
-}
-
-.file-item.favorite-item .favorite-indicator {
-    position: relative;
-    top: 0;
-    right: 0;
-    width: 30px;
-    height: 30px;
 }
 
 /* Styles for the favorites-specific empty state */

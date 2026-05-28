@@ -97,6 +97,19 @@ function prefetch() {
 }
 
 /**
+ * Synchronous best-effort display-name lookup from the pre-fetched cache.
+ * Returns a shortened UUID prefix when the cache is not yet loaded.
+ * Call `prefetch()` at view init time so the cache is warm by the time
+ * items are rendered.
+ * @param {string} userId
+ * @returns {string}
+ */
+function getDisplayNameSync(userId) {
+    if (_index === null) return `${userId.slice(0, 8)}…`;
+    return _index.get(userId) ?? `${userId.slice(0, 8)}…`;
+}
+
+/**
  * Resolve a user UUID to a display name.
  * Awaits the first load if not yet cached; subsequent calls resolve instantly.
  *
@@ -159,4 +172,4 @@ function isAvailable() {
     return addressBook.isSystemAvailable();
 }
 
-export const systemUsers = { prefetch, getDisplayName, getPhoto, getEmail, refreshCurrentUserPhoto, isAvailable };
+export const systemUsers = { prefetch, getDisplayName, getDisplayNameSync, getPhoto, getEmail, refreshCurrentUserPhoto, isAvailable };

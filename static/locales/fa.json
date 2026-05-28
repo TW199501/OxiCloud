@@ -710,5 +710,16 @@
         "colSharedBy": "به اشتراک‌گذاشته توسط",
         "colDate": "تاریخ اشتراک‌گذاری",
         "colPermissions": "مجوزها"
+    },
+    "groupby": {
+        "none": "هیچ",
+        "title": "گروه‌بندی بر اساس",
+        "owner": "مالک",
+        "shareDate": "تاریخ اشتراک"
+    },
+    "dateBucket": {
+        "today": "امروز",
+        "last7days": "۷ روز گذشته",
+        "last30days": "۳۰ روز گذشته"
     }
 }

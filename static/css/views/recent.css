@@ -20,37 +20,15 @@
     }
 }
 
-/* Styles for the recent view items */
+/* Item modifier rules (.file-item.recent-item) → resourceList.css */
+
 .recent-item {
     position: relative;
 }
 
-/* Adjustments for grid view */
-.files-grid-view .file-item.recent-item {
-    border-left: 3px solid var(--color-recent-border);
-
-    [dir="rtl"] & {
-        border-right: 3px solid var(--color-recent-border);
-        border-left: unset;
-    }
-}
-
-/* Adjustments for list view */
+/* Adjustments for list view header (page-level, not item-level) */
 .list-header.recent-header {
     grid-template-columns: 30px minmax(200px, 2fr) 1fr 1fr 120px;
-}
-
-.file-item.recent-item {
-    position: relative;
-    grid-template-columns: 30px minmax(200px, 2fr) 1fr 1fr 120px;
-}
-
-.file-item.recent-item .recent-indicator {
-    position: relative;
-    top: 0;
-    right: 0;
-    width: 30px;
-    height: 30px;
 }
 
 /* Styles for the recent-specific empty state */

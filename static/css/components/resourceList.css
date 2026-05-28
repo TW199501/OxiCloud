@@ -1,17 +1,17 @@
-.files-container {
-    padding-top: 3px; /* due to cards animation on mouse hover and page-sticky-header with a positive z-index */
-}
+/* ============================================================
+ * ResourceList component styles
+ *
+ * All styles for .file-item (both grid cards and list rows),
+ * the list header, drag ghost, per-item checkboxes, and
+ * section-specific item modifiers (.favorite-item, .recent-item,
+ * .trash-item).
+ *
+ * Page-level shell (.files-container, .selection-rect) →  fileManager.css
+ * Batch-action toolbar (.batch-selection-bar, .batch-btn …) → multiSelect.css
+ * Section page headers (.list-header.favorites-header …)   → views/*.css
+ * ============================================================ */
 
-/* Rubber band / lasso selection rectangle */
-.selection-rect {
-    position: fixed;
-    border: 1.5px solid var(--primary-color, var(--color-card-drop-border));
-    background-color: var(--color-card-drop-tint);
-    pointer-events: none;
-    z-index: 1000;
-    border-radius: 3px;
-    display: none;
-}
+/* ── Base icon container ─────────────────────────────────── */
 
 .file-icon {
     width: 100px;
@@ -34,6 +34,8 @@
     object-fit: cover;
     z-index: 1;
 }
+
+/* ── Item states ─────────────────────────────────────────── */
 
 .file-item {
     background-color: var(--color-item);
@@ -73,7 +75,36 @@
     justify-content: center;
 }
 
-/* ------------------File list View --------------------- */
+/* ── Per-item checkboxes (list + grid) ───────────────────── */
+
+.list-header-checkbox,
+.file-item .checkbox-cell {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.list-header-checkbox input[type="checkbox"],
+.file-item .checkbox-cell input[type="checkbox"] {
+    width: 17px;
+    height: 17px;
+    cursor: pointer;
+    accent-color: var(--color-accent);
+    border-radius: 4px;
+}
+
+.list-header.selection-mode {
+    grid-template-columns: 36px 1fr;
+    background-color: var(--color-multiselect-bg);
+    color: var(--color-multiselect-text);
+    border-bottom-color: var(--color-multiselect-border);
+}
+
+.list-header.selection-mode .list-header-checkbox input[type="checkbox"] {
+    accent-color: var(--color-accent);
+}
+
+/* ── List view ───────────────────────────────────────────── */
 
 .list-header {
     display: grid;
@@ -108,7 +139,7 @@
     text-align: right;
 }
 
-/* ── Owner column ─────────────────────────────────────────── */
+/* ── Owner column ────────────────────────────────────────── */
 
 /* Styles applied whenever the cell is visible (hidden class absent).
    The .hidden utility class (display:none !important) keeps it invisible
@@ -183,6 +214,7 @@
     justify-self: center;
     text-align: center;
 }
+
 .files-list-view .file-item .date-cell {
     color: var(--color-text-muted);
     font-size: 14px;
@@ -236,7 +268,7 @@
     display: inline;
 }
 
-/* --------------------- Files grid view --------------------------- */
+/* ── Grid view ───────────────────────────────────────────── */
 
 .files-grid-view {
     display: grid;
@@ -289,12 +321,13 @@
         0 6px 18px var(--color-accent-ring-dark);
 }
 
-/* element hidden on grid view */
+/* elements hidden in grid view */
 .files-grid-view .file-item .date-cell,
 .files-grid-view .file-item .size-cell,
 .files-grid-view .file-item .owner-cell {
     display: none;
 }
+
 /* Selection checkbox */
 .files-grid-view .file-item .checkbox-cell {
     position: absolute;
@@ -373,7 +406,6 @@
     display: flex;
     align-items: center;
     justify-content: center;
-
     z-index: 12;
     font-size: 15px;
     padding: 0;
@@ -461,7 +493,7 @@
     height: 60px;
 }
 
-/* ----------------------- dragged items -----------*/
+/* ── Drag ghost ──────────────────────────────────────────── */
 
 .dragged-items {
     --dragged-files-list-columns: 36px minmax(200px, 1fr);
@@ -484,7 +516,7 @@
     color: var(--color-text);
 }
 
-/* file name, text is wrapped */
+/* file name text is truncated */
 .dragged-items .file-item div:nth-child(2) {
     white-space: nowrap;
     overflow: hidden;
@@ -505,22 +537,135 @@
     position: absolute;
     top: 0;
     right: 0;
-
     transform: translate(50%, -50%);
-
     background: var(--color-content-debug-bg);
     color: var(--color-content-debug-text);
-
     border-radius: 50%;
     min-width: 20px;
     height: 20px;
-
     display: flex;
     align-items: center;
     justify-content: center;
-
     font-size: 12px;
     font-weight: bold;
-
     padding: 2px;
+}
+
+/* ── Swimlane group header ───────────────────────────────── */
+
+/* Spans the full grid width in list view; no-op in grid view since
+   grid wraps it naturally. */
+.resource-list__swimlane-header {
+    grid-column: 1 / -1;
+    padding: 6px 12px 4px;
+    font-size: 0.72rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--color-text-faint);
+    border-bottom: 1px solid var(--color-border);
+    margin-top: 8px;
+    cursor: default;
+    user-select: none;
+}
+
+.resource-list__swimlane-header:first-child,
+.list-header + .resource-list__swimlane-header {
+    margin-top: 0;
+}
+
+/* ── Swimlane group card (list view only) ────────────────── */
+
+/* When swimlane groups are present, dissolve the outer container into the
+   page background so each group card reads as its own panel. */
+.files-list-view:has(.resource-list__swimlane-group) {
+    background-color: transparent;
+    box-shadow: none;
+    border-radius: 0;
+    overflow: visible;
+    gap: 10px;
+}
+
+/* Each group is a self-contained card */
+.files-list-view .resource-list__swimlane-group {
+    background-color: var(--color-item);
+    border-radius: 10px;
+    box-shadow: 0 1px 3px var(--color-shadow-xs);
+    overflow: hidden;
+}
+
+/* The header inside a group card is always first — no extra top margin */
+.files-list-view .resource-list__swimlane-group .resource-list__swimlane-header {
+    margin-top: 0;
+}
+
+/* ── Swimlane group wrapper (grid view) ──────────────────── */
+
+/* The group wrapper must be transparent to the grid so .file-item children
+   continue to flow in the parent's columns (subgrid mirrors the column tracks).
+   The wrapper spans the full row width; items inside fill the columns naturally. */
+.files-grid-view .resource-list__swimlane-group {
+    grid-column: 1 / -1;
+    display: grid;
+    grid-template-columns: subgrid;
+    gap: 20px;
+}
+
+/* ── Section item modifiers ──────────────────────────────── */
+
+/* — Favorites — */
+
+.file-item.favorite-item {
+    border-left: 3px solid var(--color-warning-border);
+
+    [dir="rtl"] & {
+        border-right: 3px solid var(--color-warning-border);
+        border-left: unset;
+    }
+}
+
+/* list-view column override */
+.file-item.favorite-item {
+    position: relative;
+    grid-template-columns: 30px minmax(200px, 2fr) 1fr 1fr 120px;
+}
+
+.file-item.favorite-item .favorite-indicator {
+    position: relative;
+    top: 0;
+    right: 0;
+    width: 30px;
+    height: 30px;
+}
+
+/* — Recent — */
+
+.files-grid-view .file-item.recent-item {
+    border-left: 3px solid var(--color-recent-border);
+
+    [dir="rtl"] & {
+        border-right: 3px solid var(--color-recent-border);
+        border-left: unset;
+    }
+}
+
+/* list-view column override */
+.file-item.recent-item {
+    position: relative;
+    grid-template-columns: 30px minmax(200px, 2fr) 1fr 1fr 120px;
+}
+
+.file-item.recent-item .recent-indicator {
+    position: relative;
+    top: 0;
+    right: 0;
+    width: 30px;
+    height: 30px;
+}
+
+/* — Trash — */
+
+/* path-cell is shown in trashView; hide it in non-trash contexts */
+.file-item.trash-item > .path-cell {
+    display: none;
 }

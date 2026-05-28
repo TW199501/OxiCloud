@@ -710,5 +710,16 @@
         "colSharedBy": "Udostępnione przez",
         "colDate": "Data udostępnienia",
         "colPermissions": "Uprawnienia"
+    },
+    "groupby": {
+        "none": "Brak",
+        "title": "Grupuj według",
+        "owner": "Właściciel",
+        "shareDate": "Data udostępnienia"
+    },
+    "dateBucket": {
+        "today": "Dzisiaj",
+        "last7days": "Ostatnie 7 dni",
+        "last30days": "Ostatnie 30 dni"
     }
 }

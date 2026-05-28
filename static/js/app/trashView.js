@@ -4,8 +4,8 @@
 
 import { escapeHtml, formatDateTime } from '../core/formatters.js';
 import { i18n } from '../core/i18n.js';
+import { batchToolbar } from '../features/files/batchToolbar.js';
 import { fileOps } from '../features/files/fileOperations.js';
-import { multiSelect } from '../features/files/multiSelect.js';
 import * as pathTooltip from '../features/pathTooltip.js';
 import { appElements } from './state.js';
 import { ui } from './ui.js';
@@ -22,7 +22,7 @@ async function loadTrashItems() {
     const elements = appElements;
 
     try {
-        if (multiSelect) multiSelect.clear();
+        if (batchToolbar) batchToolbar.clear();
         pathTooltip.destroy(elements.filesList);
         ui.resetFilesList(); // ensure also list visible & error hidden
         elements.filesList.innerHTML = `

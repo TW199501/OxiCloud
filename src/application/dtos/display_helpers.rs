@@ -344,6 +344,31 @@ pub fn category_for(name: &str, mime: &str) -> &'static str {
     "Document"
 }
 
+/// Returns the sort order for a file category, stored as `category_order` in `storage.files`.
+///
+/// Values are **sparse multiples of 100** so a future category can be slotted between two
+/// existing ones (e.g. "RichText" = 550, between Document=500 and Spreadsheet=600) without
+/// renumbering any rows. Folders are not handled here — the SQL query hard-codes 0 for them.
+///
+/// This function delegates to [`category_for`] so the two are always in sync.
+pub fn category_order_for(name: &str, mime: &str) -> i16 {
+    match category_for(name, mime) {
+        "Image" => 100,
+        "Video" => 200,
+        "Audio" => 300,
+        "PDF" => 400,
+        "Document" => 500,
+        "Spreadsheet" => 600,
+        "Presentation" => 700,
+        "Archive" => 800,
+        "Code" => 900,
+        "Markdown" => 1000,
+        "Text" => 1100,
+        "Installer" => 1200,
+        _ => 9999, // Other / unknown
+    }
+}
+
 /// Formats a byte count into a human-readable string (1024-based).
 ///
 /// Matches the JavaScript `formatFileSize()` output exactly so the frontend

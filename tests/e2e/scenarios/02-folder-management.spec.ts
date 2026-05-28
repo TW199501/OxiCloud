@@ -1,7 +1,7 @@
 import * as path from 'path';
 import * as fs from 'fs/promises';
-import { test, expect, Page } from '@playwright/test';
-import { loginAsAdmin } from './helpers';
+import { expect, Page } from '@playwright/test';
+import { test, loginAsAdmin } from './helpers';
 
 const FIXTURES = path.join(__dirname, '../../fixtures');
 

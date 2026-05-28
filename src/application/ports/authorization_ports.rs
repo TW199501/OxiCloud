@@ -85,6 +85,7 @@ pub trait AuthorizationEngine: Send + Sync + 'static {
         kinds: &[ResourceKind],
         limit: u32,
         cursor: Option<GrantCursor>,
+        sort_by: &str,
     ) -> Result<(Vec<IncomingGrantSummary>, Option<GrantCursor>), DomainError>;
 
     /// All grants on a specific resource (for "Manage sharing" UI). Caller

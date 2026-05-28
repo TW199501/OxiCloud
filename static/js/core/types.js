@@ -296,15 +296,34 @@
  */
 
 /**
+ * Configuration for `ResourceListComponent`.
+ * @typedef {Object} ResourceListConfig
+ * @property {boolean}  [selectable=true]      - Show per-item checkboxes and enable selection.
+ * @property {boolean}  [showFavorite=true]    - Show the favorite-star button on each item.
+ * @property {boolean}  [showOwner=false]      - Show the owner column initially.
+ * @property {boolean}  [showShareBadge=true]  - Show the shared-resource badge on items.
+ * @property {boolean}  [draggable=false]      - Mark items as draggable.
+ * @property {boolean}  [showContextMenu=true] - Enable the three-dots button and right-click menu.
+ * @property {string}   [itemModifierClass]    - Extra CSS class on every .file-item (e.g. 'favorite-item').
+ * @property {string}   [dateField='modified_at'] - Which date field to display in the date column.
+ * @property {string}   [dateLabel]            - Column header label for the date column.
+ * @property {(id: string, type: 'file'|'folder') => boolean} [isFavorite]  - State provider for favorite badge.
+ * @property {(id: string, type: 'file'|'folder') => boolean} [isShared]    - State provider for share badge.
+ * @property {(item: FileItem|FolderItem, event: MouseEvent) => void} [onOpen]           - Item open/navigate callback.
+ * @property {(item: FileItem|FolderItem) => Promise<void>}           [onFavoriteToggle] - Favorite-star click callback.
+ * @property {(item: FileItem|FolderItem, event: MouseEvent) => void} [onContextMenu]    - Context menu callback.
+ * @property {(selected: Array<FileItem|FolderItem>) => void}         [onSelectionChange] - Selection change callback.
+ */
+
+/**
  * One item returned by `GET /api/grants/incoming/resources`.
- * Exactly one of `file` / `folder` is populated (indicated by `resource_type`).
+ * `resource_type` discriminates the shape of `resource`.
  * @typedef {Object} SharedWithMeItem
  * @property {ResourceTypeEnum}        resource_type
  * @property {PermissionTypeEnum[]}    permissions   - All permissions the caller holds on this resource.
  * @property {string}                  granted_at    - ISO-8601 timestamp of the earliest grant.
  * @property {string}                  granted_by    - UUID of the user who created the grant.
- * @property {FileItem|undefined}      [file]        - Populated when resource_type === 'file'.
- * @property {FolderItem|undefined}    [folder]      - Populated when resource_type === 'folder'.
+ * @property {FileItem|FolderItem}     resource      - Full resource details; shape follows resource_type.
  */
 
 /**

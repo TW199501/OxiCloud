@@ -710,5 +710,16 @@
         "colSharedBy": "द्वारा साझा किया",
         "colDate": "साझाकरण तिथि",
         "colPermissions": "अनुमतियाँ"
+    },
+    "groupby": {
+        "none": "कोई नहीं",
+        "title": "इसके अनुसार समूहीकृत करें",
+        "owner": "स्वामी",
+        "shareDate": "साझा तिथि"
+    },
+    "dateBucket": {
+        "today": "आज",
+        "last7days": "पिछले 7 दिन",
+        "last30days": "पिछले 30 दिन"
     }
 }

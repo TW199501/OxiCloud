@@ -4,7 +4,7 @@
  */
 
 import { i18n } from '../core/i18n.js';
-import { multiSelect } from '../features/files/multiSelect.js';
+import { batchToolbar } from '../features/files/batchToolbar.js';
 import { favorites } from '../features/library/favorites.js';
 import { musicView } from '../features/library/music.js';
 import { photosView } from '../features/library/photos.js';
@@ -12,7 +12,7 @@ import { recent } from '../features/library/recent.js';
 import { sharedView } from '../views/shared/sharedView.js';
 import { sharedWithMeView } from '../views/sharedWithMe/sharedWithMeView.js';
 import { loadFiles } from './filesView.js';
-import { setActionsBarMode } from './main.js';
+import { setActionsBarMode, setGroupByView, syncGroupByMenu } from './main.js';
 import { app, appElements } from './state.js';
 import { loadTrashItems } from './trashView.js';
 import { ui } from './ui.js';
@@ -201,7 +201,7 @@ function switchToSharedSection() {
         sharedView.show();
     });
 
-    if (multiSelect) multiSelect.clear();
+    if (batchToolbar) batchToolbar.clear();
 }
 
 function switchToSharedWithMeSection() {
@@ -214,6 +214,11 @@ function switchToSharedWithMeSection() {
     // Show actions-bar with view toggle (no upload / new-folder in this view)
     setActionsBarMode('sharedwithme');
 
+    // Populate the group-by dropdown with this section's dimensions.
+    // Must be called AFTER setActionsBarMode() so the selector elements exist.
+    setGroupByView(sharedWithMeView);
+    syncGroupByMenu(sharedWithMeView.groupByDefs);
+
     // Show the Owner column — names are resolved async after render.
     ui.setOwnerColumnVisible(true);
 
@@ -221,7 +226,7 @@ function switchToSharedWithMeSection() {
     toggleFileContainer(true);
     syncViewContainers();
 
-    if (multiSelect) multiSelect.clear();
+    if (batchToolbar) batchToolbar.clear();
 
     // Load and render items into the files container
     sharedWithMeView.init();
@@ -232,6 +237,8 @@ function switchToFilesSection() {
 
     // Set actions bar mode
     setActionsBarMode('files', true);
+    setGroupByView(null);
+    syncGroupByMenu([]);
 
     // Show owner column in the Files section
     ui.setOwnerColumnVisible(true);
@@ -253,7 +260,7 @@ function switchToFilesSection() {
     app.currentPath = app.userHomeFolderId || '';
     app.breadcrumbPath = [];
     ui.updateBreadcrumb();
-    if (multiSelect) multiSelect.clear();
+    if (batchToolbar) batchToolbar.clear();
 
     // temp solution
     sharedView.loadItems().then(() => {
@@ -266,6 +273,8 @@ function switchToFavoritesSection() {
 
     // Set actions bar mode
     setActionsBarMode('favorites');
+    setGroupByView(null);
+    syncGroupByMenu([]);
 
     // Show the Owner column — names are resolved async after render.
     ui.setOwnerColumnVisible(true);
@@ -296,7 +305,7 @@ function switchToFavoritesSection() {
             `);
     }
 
-    if (multiSelect) multiSelect.clear();
+    if (batchToolbar) batchToolbar.clear();
 }
 
 function switchToRecentFilesSection() {
@@ -304,6 +313,8 @@ function switchToRecentFilesSection() {
 
     // Set actions bar mode
     setActionsBarMode('recent');
+    setGroupByView(null);
+    syncGroupByMenu([]);
 
     // Hide breadcrumb (only shown in Files view)
     const breadcrumb = document.querySelector('.breadcrumb');
@@ -329,7 +340,7 @@ function switchToRecentFilesSection() {
                 <p>Error loading the recent module</p>
             `);
     }
-    if (multiSelect) multiSelect.clear();
+    if (batchToolbar) batchToolbar.clear();
 }
 
 function switchToPhotosSection() {
@@ -352,7 +363,7 @@ function switchToPhotosSection() {
     if (photosView) {
         photosView.show();
     }
-    if (multiSelect) multiSelect.clear();
+    if (batchToolbar) batchToolbar.clear();
 }
 
 function switchToTrashSection() {
@@ -367,6 +378,8 @@ function switchToTrashSection() {
     toggleFileContainer(true);
 
     setActionsBarMode('trash');
+    setGroupByView(null);
+    syncGroupByMenu([]);
 
     //reset files view + remove any error
     ui.resetFilesList();
@@ -377,7 +390,7 @@ function switchToTrashSection() {
     // Load trash items
     loadTrashItems();
 
-    if (multiSelect) multiSelect.clear();
+    if (batchToolbar) batchToolbar.clear();
 }
 
 function switchToMusicSection() {
@@ -404,7 +417,7 @@ function switchToMusicSection() {
     if (musicView) {
         musicView.show();
     }
-    if (multiSelect) multiSelect.clear();
+    if (batchToolbar) batchToolbar.clear();
 }
 
 /**
@@ -419,11 +432,13 @@ function switchToMusicSection() {
 function activateFilesUI() {
     setCurrentSection('files');
     setActionsBarMode('files', true);
+    setGroupByView(null);
+    syncGroupByMenu([]);
     const breadcrumb = document.querySelector('.breadcrumb');
     breadcrumb?.classList.remove('hidden');
     toggleFileContainer(true);
     syncViewContainers();
-    if (multiSelect) multiSelect.clear();
+    if (batchToolbar) batchToolbar.clear();
 }
 
 export {

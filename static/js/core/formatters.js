@@ -4,6 +4,8 @@
  * Contains also checkers
  */
 
+import { i18n } from './i18n.js';
+
 /**
  *
  * @param {string} str
@@ -107,4 +109,62 @@ function isEmailValid(email) {
     return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
 }
 
-export { escapeHtml, formatDateShort, formatDateTime, formatFileSize, formatQuotaSize, isEmailValid, isTextViewable };
+/**
+ * Normalize a date value into a human-readable bucket label.
+ * Buckets (newest-first): Today | Last 7 days | Last 30 days | <YYYY>
+ *
+ * Accepts:
+ *  - `string` — ISO-8601 date string (e.g. `granted_at` from the API)
+ *  - `number` — Unix timestamp in **seconds** (e.g. `sort_date`, `modified_at`)
+ *               Values < 1e12 are treated as seconds; larger values as milliseconds.
+ *  - `Date`   — JavaScript Date object
+ *
+ * @param {string | number | Date} value
+ * @returns {string}
+ */
+function normalizeDateBucket(value) {
+    let date;
+    if (value instanceof Date) {
+        date = value;
+    } else if (typeof value === 'number') {
+        date = new Date(value < 1e12 ? value * 1000 : value);
+    } else {
+        date = new Date(value);
+    }
+    const diffDays = Math.floor((Date.now() - date.getTime()) / 86_400_000);
+    if (diffDays === 0) return i18n.t('dateBucket.today', 'Today');
+    if (diffDays <= 7) return i18n.t('dateBucket.last7days', 'Last 7 days');
+    if (diffDays <= 30) return i18n.t('dateBucket.last30days', 'Last 30 days');
+    return String(date.getFullYear());
+}
+
+/**
+ * Maps a file size in bytes to a coarse, human-readable bucket label.
+ *
+ * Pass `-1` for folders — they sort before all files on the server and
+ * receive the "Folders" label client-side.
+ *
+ * Buckets:
+ *   -1                       → Folders
+ *    0                       → Empty (0 B)
+ *    1 – 1 048 575           → < 1 MB
+ *    1 048 576 – 104 857 599 → 1 – 100 MB
+ *    104 857 600 – 1 073 741 823 → 100 MB – 1 GB
+ *    1 073 741 824 – 5 368 709 119 → 1 – 5 GB
+ *    ≥ 5 368 709 120         → > 5 GB
+ *
+ * @param {number} bytes  File size in bytes, or -1 for folders.
+ * @returns {string}
+ */
+// biome-ignore format: keep the following indent
+function sizeBucket(bytes) {
+    if (bytes < 0)                       return i18n.t('sizeBucket.folders', 'Folders');
+    if (bytes === 0)                     return i18n.t('sizeBucket.empty',   'Empty (0 B)');
+    if (bytes < 1_048_576)               return i18n.t('sizeBucket.tiny',    '< 1 MB');
+    if (bytes < 104_857_600)             return i18n.t('sizeBucket.small',   '1 – 100 MB');
+    if (bytes < 1_073_741_824)           return i18n.t('sizeBucket.medium',  '100 MB – 1 GB');
+    if (bytes < 5 * 1_073_741_824)       return i18n.t('sizeBucket.large',   '1 – 5 GB');
+    return                                      i18n.t('sizeBucket.huge',    '> 5 GB');
+}
+
+export { escapeHtml, formatDateShort, formatDateTime, formatFileSize, formatQuotaSize, isEmailValid, isTextViewable, normalizeDateBucket, sizeBucket };

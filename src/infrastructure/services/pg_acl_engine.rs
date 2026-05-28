@@ -299,87 +299,243 @@ impl AuthorizationEngine for PgAclEngine {
         kinds: &[ResourceKind],
         limit: u32,
         cursor: Option<GrantCursor>,
+        sort_by: &str,
     ) -> Result<(Vec<IncomingGrantSummary>, Option<GrantCursor>), DomainError> {
-        // Build kind filter array — NULL means "all kinds".
+        // ── Common setup ──────────────────────────────────────────────────────
         let kind_strs: Option<Vec<&str>> = if kinds.is_empty() {
             None
         } else {
             Some(kinds.iter().map(|k| k.as_str()).collect())
         };
-
-        let cursor_at = cursor.as_ref().map(|c| c.granted_at);
-        let cursor_id = cursor.as_ref().map(|c| c.resource_id);
-
-        // Fetch limit+1 rows so we can detect whether a next page exists.
         let fetch_limit = (limit as i64) + 1;
 
-        // Each row: (resource_type, resource_id, permissions_text_array,
-        //             granted_at, granted_by)
+        // Unified row type — the last two columns carry the sort key when present,
+        // NULL otherwise.  This lets every sort mode share a single query_as call.
+        //   0 resource_type  String
+        //   1 resource_id    Uuid
+        //   2 permissions    Vec<String>
+        //   3 granted_at     DateTime<Utc>
+        //   4 granted_by     Uuid
+        //   5 sort_str       Option<String>  — resource_name (name/type) or owner_name (granted_by)
+        //   6 sort_int       Option<i64>     — category_order (type) or file size in bytes (size)
         type Row = (
             String,
             Uuid,
             Vec<String>,
             chrono::DateTime<chrono::Utc>,
             Uuid,
+            Option<String>,
+            Option<i64>,
         );
 
-        let rows: Vec<Row> = sqlx::query_as(
-            r#"
-            WITH agg AS (
-                SELECT
-                    resource_type,
-                    resource_id,
-                    array_agg(DISTINCT permission ORDER BY permission) AS permissions,
-                    MIN(granted_at)                                    AS granted_at,
-                    (array_agg(granted_by ORDER BY granted_at))[1]    AS granted_by
-                FROM storage.access_grants
-                WHERE subject_type = $1
-                  AND subject_id   = $2
-                  AND ($3::text[] IS NULL OR resource_type = ANY($3))
-                GROUP BY resource_type, resource_id
-            )
-            SELECT resource_type, resource_id, permissions, granted_at, granted_by
-            FROM agg
-            WHERE (  $4::timestamptz IS NULL
-                  OR granted_at < $4
-                  OR (granted_at = $4 AND resource_id < $5::uuid))
-            ORDER BY granted_at DESC, resource_id DESC
-            LIMIT $6
-            "#,
-        )
-        .bind(subject.type_str())
-        .bind(subject.id())
-        .bind(kind_strs)
-        .bind(cursor_at)
-        .bind(cursor_id)
-        .bind(fetch_limit)
-        .fetch_all(self.pool.as_ref())
-        .await
-        .map_err(|e| {
-            DomainError::internal_error("PgAcl", format!("list_incoming_resources_paged: {e}"))
-        })?;
+        // Extract all cursor fields up-front; each branch uses the subset it needs.
+        // Fixed parameter positions used in all SQL variants:
+        //   $4 = cursor_str  (resource_name / owner_name)
+        //   $5 = cursor_int  (type_order)
+        //   $6 = cursor_at   (granted_at)
+        //   $7 = cursor_id   (resource_id)
+        //   $8 = fetch_limit
+        let cursor_str = cursor.as_ref().and_then(|c| c.resource_name.clone());
+        let cursor_int = cursor.as_ref().and_then(|c| c.sort_int);
+        let cursor_at = cursor.as_ref().map(|c| c.granted_at);
+        let cursor_id = cursor.as_ref().map(|c| c.resource_id);
 
+        // ── agg CTE (identical in all branches) ───────────────────────────────
+        const AGG: &str = r#"agg AS (
+            SELECT
+                resource_type,
+                resource_id,
+                array_agg(DISTINCT permission ORDER BY permission) AS permissions,
+                MIN(granted_at)                                    AS granted_at,
+                (array_agg(granted_by ORDER BY granted_at))[1]    AS granted_by
+            FROM storage.access_grants
+            WHERE subject_type = $1
+              AND subject_id   = $2
+              AND ($3::text[] IS NULL OR resource_type = ANY($3))
+            GROUP BY resource_type, resource_id
+        )"#;
+
+        // ── Build sort-specific SQL fragments ─────────────────────────────────
+        // "name" and "type" share the same LEFT JOINs; only sort_int_expr,
+        // the cursor WHERE condition, and ORDER BY differ.
+        let sql = match sort_by {
+            "name" | "type" => {
+                let sort_int_expr = if sort_by == "type" {
+                    "CASE WHEN agg.resource_type = 'folder' THEN 0 ELSE fi.category_order::bigint END"
+                } else {
+                    "NULL::bigint"
+                };
+                let where_clause = if sort_by == "type" {
+                    r#"(  $5::integer IS NULL
+                       OR sort_int > $5
+                       OR (sort_int = $5 AND LOWER(sort_str) > $4)
+                       OR (sort_int = $5 AND LOWER(sort_str) = $4 AND resource_id > $7::uuid))"#
+                } else {
+                    r#"(  $4::text IS NULL
+                       OR LOWER(sort_str) > $4
+                       OR (LOWER(sort_str) = $4 AND resource_id > $7::uuid))"#
+                };
+                let order_clause = if sort_by == "type" {
+                    "sort_int ASC, LOWER(sort_str) ASC, resource_id ASC"
+                } else {
+                    "LOWER(sort_str) ASC, resource_id ASC"
+                };
+                format!(
+                    r#"WITH {AGG},
+                    named AS (
+                        SELECT agg.*,
+                            COALESCE(
+                                CASE WHEN agg.resource_type = 'folder' THEN f.name  END,
+                                CASE WHEN agg.resource_type = 'file'   THEN fi.name END
+                            ) AS sort_str,
+                            {sort_int_expr} AS sort_int
+                        FROM agg
+                        LEFT JOIN storage.folders f  ON f.id  = agg.resource_id AND agg.resource_type = 'folder'
+                        LEFT JOIN storage.files   fi ON fi.id = agg.resource_id AND agg.resource_type = 'file'
+                    )
+                    SELECT resource_type, resource_id, permissions, granted_at, granted_by, sort_str, sort_int
+                    FROM named
+                    WHERE {where_clause}
+                    ORDER BY {order_clause}
+                    LIMIT $8"#
+                )
+            }
+            "granted_by" => format!(
+                // Joins auth.users to sort alphabetically by username.
+                // Cursor encodes (owner_name=$4, granted_at=$6, resource_id=$7).
+                r#"WITH {AGG},
+                owner_named AS (
+                    SELECT agg.*,
+                        LOWER(u.username) AS sort_str,
+                        NULL::bigint AS sort_int
+                    FROM agg
+                    LEFT JOIN auth.users u ON u.id = agg.granted_by
+                )
+                SELECT resource_type, resource_id, permissions, granted_at, granted_by, sort_str, sort_int
+                FROM owner_named
+                WHERE (  $4::text IS NULL
+                      OR sort_str > $4
+                      OR (sort_str = $4 AND (
+                              $6::timestamptz IS NULL
+                           OR granted_at < $6
+                           OR (granted_at = $6 AND resource_id < $7::uuid))))
+                ORDER BY sort_str ASC, granted_at DESC, resource_id DESC
+                LIMIT $8"#
+            ),
+            "size" => format!(
+                // Folders have no size — they sort first with a sentinel of -1.
+                // Files sort by size ASC; resource_id breaks ties.
+                // Cursor encodes (sort_int=$5, resource_id=$7); $4/$6 unused.
+                r#"WITH {AGG},
+                sized AS (
+                    SELECT agg.*,
+                        NULL::text AS sort_str,
+                        CASE WHEN agg.resource_type = 'folder' THEN -1
+                             ELSE fi.size
+                        END AS sort_int
+                    FROM agg
+                    LEFT JOIN storage.files fi ON fi.id = agg.resource_id AND agg.resource_type = 'file'
+                )
+                SELECT resource_type, resource_id, permissions, granted_at, granted_by, sort_str, sort_int
+                FROM sized
+                WHERE (  $5::bigint IS NULL
+                      OR sort_int > $5
+                      OR (sort_int = $5 AND resource_id > $7::uuid))
+                ORDER BY sort_int ASC, resource_id ASC
+                LIMIT $8"#
+            ),
+            _ => format!(
+                // Default: sort by grant date DESC (newest first).
+                // Cursor encodes (granted_at=$6, resource_id=$7); $4/$5 unused.
+                r#"WITH {AGG}
+                SELECT resource_type, resource_id, permissions, granted_at, granted_by,
+                       NULL::text   AS sort_str,
+                       NULL::bigint AS sort_int
+                FROM agg
+                WHERE (  $6::timestamptz IS NULL
+                      OR granted_at < $6
+                      OR (granted_at = $6 AND resource_id < $7::uuid))
+                ORDER BY granted_at DESC, resource_id DESC
+                LIMIT $8"#
+            ),
+        };
+
+        // ── Execute — uniform 8 binds for every sort mode ─────────────────────
+        let mut rows: Vec<Row> = sqlx::query_as::<_, Row>(&sql)
+            .bind(subject.type_str()) // $1
+            .bind(subject.id()) // $2
+            .bind(&kind_strs) // $3
+            .bind(&cursor_str) // $4 sort_str cursor
+            .bind(cursor_int) // $5 sort_int cursor
+            .bind(cursor_at) // $6 granted_at cursor
+            .bind(cursor_id) // $7 resource_id cursor
+            .bind(fetch_limit) // $8
+            .fetch_all(self.pool.as_ref())
+            .await
+            .map_err(|e| {
+                DomainError::internal_error(
+                    "PgAcl",
+                    format!("list_incoming_resources_paged ({sort_by}): {e}"),
+                )
+            })?;
+
+        // ── Pagination ────────────────────────────────────────────────────────
         let has_next = rows.len() > limit as usize;
-        let rows: Vec<Row> = rows.into_iter().take(limit as usize).collect();
+        rows.truncate(limit as usize);
 
-        // Determine the next cursor from the last item we're actually returning.
         let next_cursor = if has_next {
-            rows.last().map(|r| GrantCursor {
-                granted_at: r.3,
-                resource_id: r.1,
+            rows.last().map(|r| {
+                let sort_str_lc = r.5.as_deref().map(str::to_lowercase);
+                match sort_by {
+                    "name" => GrantCursor {
+                        sort_by: "name".to_owned(),
+                        granted_at: r.3,
+                        resource_id: r.1,
+                        resource_name: sort_str_lc,
+                        sort_int: None,
+                    },
+                    "type" => GrantCursor {
+                        sort_by: "type".to_owned(),
+                        granted_at: r.3,
+                        resource_id: r.1,
+                        resource_name: sort_str_lc,
+                        sort_int: r.6,
+                    },
+                    "granted_by" => GrantCursor {
+                        sort_by: "granted_by".to_owned(),
+                        granted_at: r.3,
+                        resource_id: r.1,
+                        resource_name: r.5.clone(), // already lowercased by SQL
+                        sort_int: None,
+                    },
+                    "size" => GrantCursor {
+                        sort_by: "size".to_owned(),
+                        granted_at: r.3,
+                        resource_id: r.1,
+                        resource_name: None,
+                        sort_int: r.6,
+                    },
+                    _ => GrantCursor {
+                        sort_by: "granted_at".to_owned(),
+                        granted_at: r.3,
+                        resource_id: r.1,
+                        resource_name: None,
+                        sort_int: None,
+                    },
+                }
             })
         } else {
             None
         };
 
-        // Convert rows into domain summaries.
+        // ── Convert rows to domain summaries ──────────────────────────────────
         let summaries = rows
             .into_iter()
-            .filter_map(|(rt, rid, perms_str, granted_at, granted_by)| {
+            .filter_map(|(rt, rid, perms_str, granted_at, granted_by, _, _)| {
                 let resource_type = ResourceKind::parse(&rt)?;
                 let permissions = perms_str
-                    .iter()
-                    .filter_map(|s| Permission::parse(s))
+                    .into_iter()
+                    .filter_map(|s| Permission::parse(&s))
                     .collect();
                 Some(IncomingGrantSummary {
                     resource_type,

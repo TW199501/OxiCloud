@@ -8,11 +8,11 @@ import { installFetchInterceptor } from '../core/fetchWrapper.js';
 installFetchInterceptor();
 
 import { Modal } from '../components/modal.js';
-import { formatFileSize, formatQuotaSize } from '../core/formatters.js';
+import { escapeHtml, formatFileSize, formatQuotaSize } from '../core/formatters.js';
 import { i18n } from '../core/i18n.js';
 import { oxiIconsInit } from '../core/icons.js';
+import { batchToolbar } from '../features/files/batchToolbar.js';
 import { fileOps } from '../features/files/fileOperations.js';
-import { multiSelect } from '../features/files/multiSelect.js';
 import { favorites } from '../features/library/favorites.js';
 import { recent } from '../features/library/recent.js';
 import { fileSharing } from '../features/sharing/fileSharing.js';
@@ -50,7 +50,7 @@ let uploadDropdownDocumentClickHandler = null;
 let uploadDropdownBindingsController = null;
 let actionsBarDelegationBound = false;
 
-const _multiSelectButons = `
+const _batchToolbarButons = `
     <div class="action-buttons batch-selection-bar hidden" id="multi-select-buttons">
         <div class="list-header-checkbox">
             <button class="batch-bar-close" id="batch-selection-close" title="Cancel selection">
@@ -83,6 +83,15 @@ const _multiSelectButons = `
 
 const _toggleButtons = `
     <div class="view-toggle">
+        <div class="group-by-selector hidden" id="group-by-selector">
+            <button class="toggle-btn group-by-btn" id="group-by-btn"
+                    title="Group by" data-i18n-title="groupby.title">
+                <i class="fas fa-layer-group"></i>
+                <span class="group-by-label"></span>
+            </button>
+            <div class="group-by-menu hidden" id="group-by-menu"></div>
+        </div>
+        <span class="view-toggle-separator hidden" id="group-by-separator"></span>
         <button class="toggle-btn active" id="grid-view-btn" title="Grid view">
             <i class="fas fa-th"></i>
         </button>
@@ -117,7 +126,7 @@ const ACTIONS_BAR_TEMPLATES = {
                 <span data-i18n="actions.new_folder">New folder</span>
             </button>
         </div>
-        ${_multiSelectButons}
+        ${_batchToolbarButons}
         ${_toggleButtons}
     `,
     trash: `
@@ -131,7 +140,7 @@ const ACTIONS_BAR_TEMPLATES = {
     `,
     favorites: `
         <div class="action-buttons" id="default-buttons"></div>
-        ${_multiSelectButons}
+        ${_batchToolbarButons}
         ${_toggleButtons}
     `,
     recent: `
@@ -141,11 +150,12 @@ const ACTIONS_BAR_TEMPLATES = {
                 <span data-i18n="actions.clear_recent">Clear recent</span>
             </button>
         </div>
-        ${_multiSelectButons}
+        ${_batchToolbarButons}
         ${_toggleButtons}
     `,
     sharedwithme: `
         <div class="action-buttons" id="default-buttons"></div>
+        ${_batchToolbarButons}
         ${_toggleButtons}
     `
 };
@@ -189,6 +199,75 @@ function setActionsBarMode(mode, force = false) {
     }
 }
 
+/**
+ * @typedef {{ key: string, label: string, setGroupBy: (key: string) => void }} GroupByCapableView
+ */
+
+/**
+ * The view that currently owns the group-by selector, or `null` when no
+ * section supports grouping.  Set by `setGroupByView()` from navigation.js.
+ * @type {{ setGroupBy: (key: string) => void } | null}
+ */
+let _groupByView = null;
+
+/**
+ * Update the reference to the view that handles group-by changes.
+ * Called by navigation.js when the active section changes.
+ * @param {{ setGroupBy: (key: string) => void } | null} view
+ */
+function setGroupByView(view) {
+    _groupByView = view;
+}
+
+/** @type {((e: MouseEvent) => void) | null} */
+let _groupByDocumentClickHandler = null;
+
+/**
+ * Populate and show (or hide) the group-by dropdown based on the active
+ * section's `groupByDefs`.  Pass an empty array (or omit) to hide the button.
+ *
+ * Must be called AFTER `setActionsBarMode()` so the selector elements exist
+ * in the DOM.
+ *
+ * @param {Array<{key: string, label: string}>} [defs]
+ */
+function syncGroupByMenu(defs = []) {
+    const selector = document.getElementById('group-by-selector');
+    const separator = document.getElementById('group-by-separator');
+    const menu = document.getElementById('group-by-menu');
+    if (!selector || !menu) return;
+
+    const hasDefs = defs.length > 0;
+    selector.classList.toggle('hidden', !hasDefs);
+    separator?.classList.toggle('hidden', !hasDefs);
+
+    if (!hasDefs) {
+        // Reset active indicator when the section has no group-by support
+        const btn = document.getElementById('group-by-btn');
+        btn?.classList.remove('active');
+        const lbl = btn?.querySelector('.group-by-label');
+        if (lbl) lbl.textContent = '';
+        return;
+    }
+
+    // Rebuild menu options — call i18n.t() directly so each label is resolved
+    // at call time (translations are loaded by the time any section switch runs).
+    menu.innerHTML = `<button class="group-by-option active" data-group-by="">${escapeHtml(i18n.t('groupby.none', 'None'))}</button>`;
+    for (const def of defs) {
+        menu.insertAdjacentHTML('beforeend', `<button class="group-by-option" data-group-by="${escapeHtml(def.key)}">${escapeHtml(def.label)}</button>`);
+    }
+
+    // One stable document-level handler to close the menu on outside clicks.
+    if (_groupByDocumentClickHandler) {
+        document.removeEventListener('click', _groupByDocumentClickHandler);
+    }
+    _groupByDocumentClickHandler = (e) => {
+        if (/** @type {HTMLElement} */ (e.target)?.closest('#group-by-selector')) return;
+        document.getElementById('group-by-menu')?.classList.add('hidden');
+    };
+    document.addEventListener('click', _groupByDocumentClickHandler);
+}
+
 function setupActionsBarDelegation() {
     if (actionsBarDelegationBound || !elements.actionsBar) return;
     actionsBarDelegationBound = true;
@@ -197,7 +276,26 @@ function setupActionsBarDelegation() {
         const btn = /** @type {HTMLElement} */ (e.target)?.closest('button');
         if (!btn) return;
 
+        // ── Group-by option selected ──────────────────────────────────────────
+        if (btn.classList.contains('group-by-option')) {
+            const key = btn.dataset.groupBy ?? '';
+            _groupByView?.setGroupBy(key);
+            document.querySelectorAll('.group-by-option').forEach((b) => {
+                b.classList.remove('active');
+            });
+            btn.classList.add('active');
+            document.getElementById('group-by-menu')?.classList.add('hidden');
+            const groupByBtn = document.getElementById('group-by-btn');
+            groupByBtn?.classList.toggle('active', key !== '');
+            const lbl = groupByBtn?.querySelector('.group-by-label');
+            if (lbl) lbl.textContent = key !== '' ? (btn.textContent ?? '') : '';
+            return;
+        }
+
         switch (btn.id) {
+            case 'group-by-btn':
+                document.getElementById('group-by-menu')?.classList.toggle('hidden');
+                return;
             case 'upload-files-btn': {
                 e.stopPropagation();
                 const menu = document.getElementById('upload-dropdown-menu');
@@ -386,9 +484,9 @@ function initApp() {
     }
 
     // Initialize multi-select / batch actions
-    if (multiSelect?.init) {
+    if (batchToolbar?.init) {
         console.log('Initializing multi-select module');
-        multiSelect.init();
+        batchToolbar.init();
     }
 
     window.addEventListener('authenticationDone', async () => {
@@ -798,4 +896,4 @@ function updateStorageUsageDisplay(userData) {
     console.log(`Updated storage display: ${usagePercentage}% (${usedFormatted} / ${quotaFormatted})`);
 }
 
-export { deserializeHash, initApp, setActionsBarMode, updateHistory, updateStorageUsageDisplay };
+export { deserializeHash, initApp, setActionsBarMode, setGroupByView, syncGroupByMenu, updateHistory, updateStorageUsageDisplay };

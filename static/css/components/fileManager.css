@@ -1,0 +1,17 @@
+/* File-manager page shell — layout concerns specific to the file-manager section.
+ * Item rendering (grid cards, list rows, drag ghost) lives in resourceList.css. */
+
+.files-container {
+    padding-top: 3px; /* cards animate on hover; sticky header has positive z-index */
+}
+
+/* Rubber band / lasso selection rectangle */
+.selection-rect {
+    position: fixed;
+    border: 1.5px solid var(--primary-color, var(--color-card-drop-border));
+    background-color: var(--color-card-drop-tint);
+    pointer-events: none;
+    z-index: 1000;
+    border-radius: 3px;
+    display: none;
+}

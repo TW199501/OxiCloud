@@ -710,5 +710,16 @@
         "colSharedBy": "Gedeeld door",
         "colDate": "Datum gedeeld",
         "colPermissions": "Machtigingen"
+    },
+    "groupby": {
+        "none": "Geen",
+        "title": "Groeperen op",
+        "owner": "Eigenaar",
+        "shareDate": "Deeldatum"
+    },
+    "dateBucket": {
+        "today": "Vandaag",
+        "last7days": "Afgelopen 7 dagen",
+        "last30days": "Afgelopen 30 dagen"
     }
 }

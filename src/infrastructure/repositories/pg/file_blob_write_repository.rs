@@ -12,6 +12,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use uuid::Uuid;
 
+use crate::application::dtos::display_helpers::category_order_for;
 use crate::application::ports::storage_ports::{CopyFolderTreeResult, FileWritePort};
 use crate::common::errors::DomainError;
 use crate::domain::entities::file::File;
@@ -226,8 +227,8 @@ impl FileBlobWriteRepository {
 
         let row = match sqlx::query_as::<_, (String, i64, i64)>(
             r#"
-            INSERT INTO storage.files (name, folder_id, user_id, blob_hash, size, mime_type)
-            VALUES ($1, $2::uuid, $3, $4, $5, $6)
+            INSERT INTO storage.files (name, folder_id, user_id, blob_hash, size, mime_type, category_order)
+            VALUES ($1, $2::uuid, $3, $4, $5, $6, $7)
             RETURNING id::text,
                       EXTRACT(EPOCH FROM created_at)::bigint,
                       EXTRACT(EPOCH FROM updated_at)::bigint
@@ -239,6 +240,7 @@ impl FileBlobWriteRepository {
         .bind(&blob_hash)
         .bind(size as i64)
         .bind(&content_type)
+        .bind(category_order_for(&name, &content_type))
         .fetch_one(self.pool.as_ref())
         .await
         {
@@ -374,18 +376,19 @@ impl FileWritePort for FileBlobWriteRepository {
         >(
             r#"
             WITH src AS (
-                SELECT name, folder_id, user_id, blob_hash, size, mime_type
+                SELECT name, folder_id, user_id, blob_hash, size, mime_type, category_order
                   FROM storage.files
                  WHERE id = $1::uuid AND NOT is_trashed
             ),
             new_file AS (
-                INSERT INTO storage.files (name, folder_id, user_id, blob_hash, size, mime_type)
+                INSERT INTO storage.files (name, folder_id, user_id, blob_hash, size, mime_type, category_order)
                 SELECT name,
                        COALESCE($2::uuid, folder_id),
                        user_id,
                        blob_hash,
                        size,
-                       mime_type
+                       mime_type,
+                       category_order
                   FROM src
                 RETURNING id::text, name, folder_id::text, size, mime_type,
                           EXTRACT(EPOCH FROM created_at)::bigint,
@@ -537,8 +540,8 @@ impl FileWritePort for FileBlobWriteRepository {
 
         let row = sqlx::query_as::<_, (String, i64, i64)>(
             r#"
-            INSERT INTO storage.files (name, folder_id, user_id, blob_hash, size, mime_type)
-            VALUES ($1, $2::uuid, $3, $4, $5, $6)
+            INSERT INTO storage.files (name, folder_id, user_id, blob_hash, size, mime_type, category_order)
+            VALUES ($1, $2::uuid, $3, $4, $5, $6, $7)
             RETURNING id::text,
                       EXTRACT(EPOCH FROM created_at)::bigint,
                       EXTRACT(EPOCH FROM updated_at)::bigint
@@ -550,6 +553,7 @@ impl FileWritePort for FileBlobWriteRepository {
         .bind(placeholder_hash)
         .bind(size as i64)
         .bind(&content_type)
+        .bind(category_order_for(&name, &content_type))
         .fetch_one(self.pool.as_ref())
         .await
         .map_err(|e| DomainError::internal_error("FileBlobWrite", format!("deferred: {e}")))?;

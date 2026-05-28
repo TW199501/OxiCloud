@@ -43,9 +43,7 @@
     color: var(--color-trash-delete);
 }
 
-.file-item.trash-item > .path-cell {
-    display: none;
-}
+/* .file-item.trash-item > .path-cell → resourceList.css */
 
 .actions-cell {
     display: flex;

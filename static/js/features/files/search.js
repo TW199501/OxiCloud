@@ -7,7 +7,7 @@
  * displays the enriched results returned by the server.
  */
 
-import { loadFiles } from '../../app/filesView.js';
+import { addItem as filesViewAddItem, loadFiles } from '../../app/filesView.js';
 import { app } from '../../app/state.js';
 import { ui } from '../../app/ui.js';
 import { getAuthHeaders } from './fileOperations.js';
@@ -200,12 +200,12 @@ const search = {
 
         // Render folders (server-provided enriched data)
         results.folders.forEach((folder) => {
-            ui.addFolderToView(folder);
+            filesViewAddItem(folder);
         });
 
         // Render files (server-provided enriched data)
         results.files.forEach((file) => {
-            ui.addFileToView(file);
+            filesViewAddItem(file);
         });
     },
 

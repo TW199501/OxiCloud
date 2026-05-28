@@ -1,8 +1,25 @@
 // @ts-check
 
+/**
+ * OxiCloud – Files section view.
+ *
+ * Orchestrates the main Files section:
+ *   - Data fetching via `filesModel`
+ *   - Rendering via a `ResourceListComponent` instance
+ *   - Drag-and-drop initialisation (delegated to `ui.initDragDrop`)
+ *
+ * Exports `loadFiles` (navigation & deep-link entry-point) and `addItem`
+ * (post-upload / post-create optimistic UI updates used by fileOperations
+ * and search).
+ */
+
+import { ResourceListComponent } from '../components/resourceList.js';
 import { i18n } from '../core/i18n.js';
+import { batchToolbar } from '../features/files/batchToolbar.js';
 import { inlineViewer } from '../features/files/inlineViewer.js';
-import { multiSelect } from '../features/files/multiSelect.js';
+import { favorites } from '../features/library/favorites.js';
+import { fetchListing, rebuildBreadCrumb } from '../model/filesModel.js';
+import { grants } from '../model/grants.js';
 import { resolveHomeFolder } from './authSession.js';
 import { updateHistory } from './main.js';
 import { app } from './state.js';
@@ -11,263 +28,174 @@ import { uiNotifications } from './uiNotifications.js';
 
 /** @import {FileItem, FolderItem} from '../core/types.js' */
 
-let isLoadingFiles = false;
+/** @type {ResourceListComponent|null} */
+let _component = null;
+
+/** Guard against concurrent `loadFiles` calls. */
+let _loading = false;
 
 /**
- * getFolder information
- * @param {string} id the id of the folder
- * @returns {Promise<FolderItem>}
+ * Return (creating on first call) the `ResourceListComponent` bound to
+ * `#files-list`. The element must already be in the DOM.
+ * @returns {ResourceListComponent|null}
  */
-async function getFolder(id) {
-    /** @type {HeadersInit} */
-    const headers = {
-        'Cache-Control': 'no-cache, no-store, must-revalidate',
-        Pragma: 'no-cache'
-    };
+function _ensureComponent() {
+    const filesList = document.getElementById('files-list');
+    if (!filesList) return null;
 
-    /** @type {RequestInit} */
-    const requestOptions = {
-        headers,
-        credentials: 'same-origin',
-        cache: 'no-store'
-    };
+    if (!_component) {
+        _component = new ResourceListComponent(/** @type {HTMLElement} */ (filesList), {
+            selectable: true,
+            showFavorite: true,
+            showOwner: true,
+            showShareBadge: true,
+            draggable: true,
+            showContextMenu: true,
+            isFavorite: (id, type) => favorites.isFavorite(id, type),
+            isShared: (id, type) => grants.getOutgoingGrantsFor(type, id).length > 0,
+            onOpen: (item) => ui.openItem(item),
+            onFavoriteToggle: async (item) => {
+                const isFile = 'mime_type' in item;
+                const type = isFile ? 'file' : 'folder';
+                if (favorites.isFavorite(item.id, type)) {
+                    await favorites.removeFromFavorites(item.id, type);
+                    _component?.setFavoriteVisualState(item.id, type, false);
+                } else {
+                    await favorites.addToFavorites(item.id, item.name, type, null);
+                    _component?.setFavoriteVisualState(item.id, type, true);
+                }
+            },
+            onContextMenu: (item, e) => ui.showContextMenuForItem(item, e),
+            onSelectionChange: (selectedItems) => {
+                batchToolbar._selected.clear();
+                for (const sel of selectedItems) {
+                    const isFile = 'mime_type' in sel;
+                    batchToolbar._selected.set(sel.id, {
+                        id: sel.id,
+                        name: sel.name,
+                        type: isFile ? 'file' : 'folder',
+                        parentId: isFile ? /** @type {FileItem} */ (sel).folder_id || '' : /** @type {FolderItem} */ (sel).parent_id || ''
+                    });
+                }
+                batchToolbar._syncUI();
+            }
+        });
 
-    const folderInformations = await fetch(`/api/folders/${id}`, requestOptions);
-    if (folderInformations.ok) {
-        return folderInformations.json();
-    } else {
-        console.warn(`Error fetching folder ${id}`);
-        return Promise.reject(null);
+        // Wire drag-and-drop on the container once the component is created.
+        ui.initDragDrop(/** @type {HTMLElement} */ (filesList));
     }
+
+    return _component;
 }
 
 /**
- * Rebuild breadcrumb from selected folder (iterate up to root).
+ * Append a single item to the current view (post-upload / post-create
+ * optimistic update). No-op when the Files section is not active or the
+ * item is already in the list.
  *
- * Stops traversal gracefully when a parent folder is not accessible
- * (e.g. the user entered via a "Shared with me" grant whose parent
- * folder they have no permission on). In that case the partial
- * breadcrumb built so far is kept — the deepest reachable ancestor
- * acts as the visual root, matching how Google Drive / Dropbox handle
- * shared subtrees.
+ * Called by `fileOperations.js` and `search.js`.
  *
- * An error on the *target folder itself* (first iteration) is still
- * treated as a real error and redirects to the home folder.
+ * @param {FileItem|FolderItem} item
  */
-async function rebuildBreadCrumb() {
-    /**
-     * Store the leaf (this is the current displayed folder)
-     * @type {FolderItem | null}
-     */
-    let currentFolderInfo = null;
-
-    // rebuild full breadcrumb,
-    // TODO: to optimize, data may already be known / or ETAG could be interesting to reduce load
-    app.breadcrumbPath = [];
-
-    /** @type {string | null} */
-    let id = app.currentPath;
-
-    // recurse from selected folder to root
-    while (id !== null) {
-        console.log(`fetching folder information for folder ${id}`);
-        try {
-            const folderInfo = await getFolder(id);
-
-            // store the Leaf which is the current folder
-            if (currentFolderInfo === null) {
-                currentFolderInfo = folderInfo;
-            }
-
-            // Add every folder to the breadcrumb, including the root (home folder).
-            // updateBreadcrumb() no longer auto-prepends home — it's our responsibility here.
-            app.breadcrumbPath.unshift({
-                id: folderInfo.id,
-                name: folderInfo.name
-            });
-
-            // iterate to parent folder
-            id = folderInfo.parent_id;
-        } catch (_e) {
-            if (currentFolderInfo === null) {
-                // Failed on the target folder itself — real error, fall back to home.
-                console.warn(`Cannot access target folder ${app.currentPath}, falling back to home`);
-                uiNotifications.show('error: folder not found or permission denied', 'the given folder is not available or you do not have sufficient rights');
-                app.breadcrumbPath = [];
-                id = app.userHomeFolderId;
-                if (id) app.currentPath = id;
-            } else {
-                // Failed on a parent — hit the permission boundary of a shared subtree.
-                // Stop traversal; the partial breadcrumb is the best we can show.
-                console.log(`Stopped breadcrumb traversal at permission boundary (parent of ${currentFolderInfo.id} is not accessible)`);
-                break;
-            }
-        }
-    }
-
-    // store informations on the current folder
-    app.currentFolderInfo = currentFolderInfo;
+function addItem(item) {
+    const component = _ensureComponent();
+    if (!component) return;
+    // Reveal the list if the empty-state is showing
+    ui.resetFilesList();
+    component.addItem(item);
 }
 
-// TODO split load() vs view()
 /**
- * Files view loading logic
+ * Load and render the contents of `app.currentPath`, rebuilding the
+ * breadcrumb and updating browser history.
  *
- * @param {Object} options
- * @param {boolean} [options.insertHistory] add browser history (default true)
- * @param {boolean} [options.forceRefresh] force refresh of content
- *
+ * @param {Object}  [options]
+ * @param {boolean} [options.insertHistory=true]
+ * @param {boolean} [options.forceRefresh=false]
  */
 async function loadFiles(options = { insertHistory: true }) {
+    if (_loading) {
+        console.log('A file load is already in progress, ignoring request');
+        return;
+    }
+    _loading = true;
+
+    // Delay spinner so fast loads avoid the flash
+    const spinnerTimeout = setTimeout(() => {
+        ui.showError(`
+            <div class="files-loading-spinner">
+                <div class="spinner"></div>
+                <span>${i18n.t('files.loading')}</span>
+            </div>
+        `);
+    }, 100);
+
     try {
-        console.log('Starting loadFiles() - loading files...', options);
+        if (!app.userHomeFolderId) await resolveHomeFolder();
 
-        const forceRefresh = options.forceRefresh || false;
-
-        if (isLoadingFiles) {
-            console.log('A file load is already in progress, ignoring request');
-            return;
-        }
-
-        isLoadingFiles = true;
-
-        // This to avoid blinking page, a better solution would be to put loading on an overlay and remove timeout
-        const loadingFiles = setTimeout(() => {
-            // display loader after few delay (will be canceled if result take less time)
-            ui.showError(`
-                <div class="files-loading-spinner">
-                    <div class="spinner"></div>
-                    <span>${i18n.t('files.loading')}</span>
-                </div>
-            `);
-        }, 100);
-
-        if (!app.userHomeFolderId) {
-            await resolveHomeFolder();
-        }
-
-        const timestamp = Math.floor(Date.now() / 1000);
-
-        await rebuildBreadCrumb();
-
-        // request a breadcrumb paint
-        ui.updateBreadcrumb();
-
-        updateHistory(options.insertHistory || false);
-
-        let url;
-
+        // Resolve path to home folder when none is set
         if (!app.currentPath || app.currentPath === '') {
             if (app.userHomeFolderId) {
-                url = `/api/folders/${app.userHomeFolderId}/listing?t=${timestamp}`;
                 app.currentPath = app.userHomeFolderId;
                 app.breadcrumbPath = [];
-                ui.updateBreadcrumb();
                 console.log(`Loading user folder: ${app.userHomeFolderName} (${app.userHomeFolderId})`);
             } else {
-                url = `/api/folders?t=${timestamp}`;
-                console.warn('Emergency fallback to root folder - this should not normally happen');
+                console.warn('No home folder id — this should not normally happen');
             }
-        } else {
-            url = `/api/folders/${app.currentPath}/listing?t=${timestamp}`;
-            console.log(`Loading subfolder content: ${app.currentPath}`);
         }
 
-        /** @type {HeadersInit} */
-        const headers = {
-            'Cache-Control': 'no-cache, no-store, must-revalidate',
-            Pragma: 'no-cache'
-        };
+        await rebuildBreadCrumb();
+        ui.updateBreadcrumb();
+        updateHistory(options.insertHistory ?? true);
 
-        /** @type {RequestInit} */
-        const requestOptions = {
-            headers,
-            credentials: 'same-origin',
-            cache: 'no-store'
-        };
+        const { folders, files } = await fetchListing(app.currentPath, {
+            forceRefresh: options.forceRefresh ?? false
+        });
 
-        if (forceRefresh) {
-            url += `&force_refresh=true`;
-            if (requestOptions.headers) {
-                const headers = new Headers(requestOptions.headers);
-                headers.set('X-Force-Refresh', 'true');
-                requestOptions.headers = headers;
-            }
-            console.log('Forcing complete refresh ignoring cache');
-        }
+        clearTimeout(spinnerTimeout);
 
-        console.log(`Loading listing from ${url}`);
-        const response = await fetch(url, requestOptions);
-
-        // not required anymore
-        clearTimeout(loadingFiles);
-
-        if (response.status === 403) {
-            console.warn('Forbidden when loading files');
-            // FIXME: i18n
-            ui.showError(`<p>Could not load files</p>`);
-            return;
-        }
-
-        if (!response.ok) {
-            throw new Error(`Server responded with status: ${response.status}`);
-        }
-
-        const listing = await response.json();
-
-        ui._items.clear();
+        // Prepare the container (shows #files-list, hides error panel)
         ui.resetFilesList();
-        if (multiSelect) {
-            multiSelect.clear();
-            multiSelect.init(); // this will wire buttons & select-all-checkbox
-        }
 
-        /** @type {FolderItem[]} */
-        const folderList = Array.isArray(listing.folders) ? listing.folders : [];
+        const component = _ensureComponent();
+        if (!component) return;
 
-        /** @type {FileItem[]} */
-        const fileList = Array.isArray(listing.files) ? listing.files : [];
+        batchToolbar.clear();
+        batchToolbar.init();
+        batchToolbar.setActiveComponent(component);
 
-        if (folderList.length === 0 && fileList.length === 0) {
+        if (folders.length === 0 && files.length === 0) {
             ui.showEmptyList();
         } else {
-            ui.renderFolders(folderList);
-            ui.renderFiles(fileList);
-            ui.resolveOwnerCells();
-
-            // check if a file was provided
-            if (app.viewFile) {
-                let fileFound = null;
-
-                // lookup for the given fle
-                for (const file of fileList) {
-                    if (file.id === app.viewFile) {
-                        fileFound = file;
-                        break;
-                    }
-                }
-
-                if (fileFound) {
-                    console.log(`file ${app.viewFile} found, calling viewer`);
-                    await inlineViewer.openFile(fileFound);
-                } else {
-                    // remove file
-                    console.log(`file ${app.viewFile} not found`);
-                    app.viewFile = null;
-
-                    // correct url/history as file is not found
-                    updateHistory(false);
-                }
-            }
+            component.render([...folders, ...files]);
+            await component.resolveOwnerCells();
         }
 
-        console.log(`Loaded ${folderList.length} folders and ${fileList.length} files`);
-    } catch (error) {
-        console.error('Error loading folders:', error);
-        ui.showNotification('Error', 'Could not load files and folders');
+        console.log(`Loaded ${folders.length} folders and ${files.length} files`);
+
+        // Deep-link: open a specific file if requested via app.viewFile
+        if (app.viewFile) {
+            const fileFound = files.find((f) => f.id === app.viewFile) ?? null;
+            if (fileFound) {
+                console.log(`file ${app.viewFile} found, calling viewer`);
+                await inlineViewer.openFile(fileFound);
+            } else {
+                console.log(`file ${app.viewFile} not found`);
+                app.viewFile = null;
+                updateHistory(false);
+            }
+        }
+    } catch (/** @type {any} */ err) {
+        clearTimeout(spinnerTimeout);
+        if (err?.status === 403) {
+            ui.showError(`<p>${i18n.t('errors.forbidden', 'Could not load files')}</p>`);
+        } else {
+            console.error('Error loading folders:', err);
+            uiNotifications.show('Error', 'Could not load files and folders');
+        }
     } finally {
-        isLoadingFiles = false;
+        _loading = false;
     }
 }
 
-export { loadFiles };
+export { addItem, loadFiles };

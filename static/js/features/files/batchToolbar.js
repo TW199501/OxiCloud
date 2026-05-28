@@ -1,13 +1,15 @@
 /**
- * OxiCloud - Multi-Select & Batch Actions Module
+ * OxiCloud — Batch Toolbar Module
  *
- * Adds checkboxes to grid and list views, replaces the list-view header
- * with a NextCloud-style selection bar when items are selected, and
- * provides batch delete / move / download / favorites operations.
+ * Manages the floating selection bar that appears when items are selected,
+ * and executes batch operations (delete, move, download, favorites).
+ *
+ * Selection state (_selected, handleToggleItem, selectAll, …) is kept here
+ * while the main file manager still uses its own delegation (ui.js).
+ * Once ui.js is migrated to ResourceListComponent (plan step B5), all
+ * selection mechanics will live in the component and this module will
+ * shrink to only the toolbar UI and batch-operation API calls.
  */
-
-// TODO: rename into selection-bar ?
-// TODO: merge with photo part
 
 import { loadFiles } from '../../app/filesView.js';
 import { app } from '../../app/state.js';
@@ -20,9 +22,10 @@ import { getAuthHeaders } from './fileOperations.js';
 /**
  * @import {ItemTypeEnum, LightItem} from '../../core/types.js'
  * @import {BatchResult} from './fileOperations.js'
+ * @import {ResourceListComponent} from '../../components/resourceList.js'
  */
 
-const multiSelect = {
+const batchToolbar = {
     /** @type {Map<String, LightItem>} items: Map<id, { id, name, type, parentId }> */
 
     _selected: new Map(),
@@ -32,6 +35,23 @@ const multiSelect = {
 
     /** Whether the selection bar is currently visible */
     _barVisible: false,
+
+    /**
+     * The `ResourceListComponent` currently managing the active view.
+     * When set, keyboard shortcuts (Ctrl+A, Escape) delegate to the component
+     * so its internal selection state stays consistent.
+     * @type {ResourceListComponent | null}
+     */
+    _activeComponent: null,
+
+    /**
+     * Register (or unregister) the component that owns the current view's
+     * selection state.  Pass `null` when leaving a component-managed view.
+     * @param {ResourceListComponent | null} component
+     */
+    setActiveComponent(component) {
+        this._activeComponent = component;
+    },
 
     // ── Public API ──────────────────────────────────────────
 
@@ -112,6 +132,13 @@ const multiSelect = {
         document.querySelectorAll('.item-checkbox').forEach((cb) => {
             /** @type {HTMLInputElement} */ (cb).checked = false;
         });
+        // Reset the active component's internal selection state without going
+        // through onSelectionChange (which would re-enter this method).
+        if (this._activeComponent) {
+            this._activeComponent._selected.clear();
+            this._activeComponent._lastClickedIndex = -1;
+            this._activeComponent._syncSelectAllCheckbox();
+        }
         this._syncUI();
     },
 
@@ -324,6 +351,8 @@ const multiSelect = {
     },
 
     _syncItemCheckboxes() {
+        // When a ResourceListComponent is active it owns checkbox state — skip.
+        if (this._activeComponent) return;
         document.querySelectorAll('.file-item').forEach((el) => {
             const cb = /** @type {HTMLInputElement} */ (el.querySelector('.item-checkbox'));
             if (cb) cb.checked = el.classList.contains('selected');
@@ -512,15 +541,23 @@ const multiSelect = {
             if (target.closest('input, textarea, [contenteditable], .rename-dialog, .share-dialog, .confirm-dialog')) return;
 
             const selectAllCheckbox = /** @type {HTMLInputElement} */ (document.getElementById('select-all-checkbox'));
-            // ctrl+a cmd+a
+            // ctrl+a / cmd+a — delegate to active component when present
             if ((e.ctrlKey || e.metaKey) && e.key === 'a') {
-                if (selectAllCheckbox) selectAllCheckbox.checked = true;
-                this.selectAll();
+                if (this._activeComponent) {
+                    this._activeComponent.selectAll();
+                } else {
+                    if (selectAllCheckbox) selectAllCheckbox.checked = true;
+                    this.selectAll();
+                }
                 e.preventDefault();
             }
-            if (e.key === 'Escape' && this.hasSelection) {
-                this.clear();
-                if (selectAllCheckbox) selectAllCheckbox.checked = false;
+            if (e.key === 'Escape') {
+                if (this._activeComponent && this._activeComponent._selected.size > 0) {
+                    this._activeComponent.clearSelection();
+                } else if (this.hasSelection) {
+                    this.clear();
+                    if (selectAllCheckbox) selectAllCheckbox.checked = false;
+                }
             }
             if (e.key === 'Delete' && this.hasSelection) this.batchDelete();
         });
@@ -536,4 +573,4 @@ const multiSelect = {
     }
 };
 
-export { multiSelect };
+export { batchToolbar };

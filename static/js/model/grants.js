@@ -88,14 +88,16 @@ const grants = {
      * @param {ResourceTypeEnum[]} [opts.resourceTypes] - Resource types to include (default: ['file','folder']).
      * @param {number}             [opts.limit]         - Max items per page (1–200, default 50).
      * @param {string}             [opts.cursor]        - Opaque cursor from a previous call; omit for first page.
+     * @param {string}             [opts.orderBy]       - Sort dimension: 'granted_at' | 'granted_by' (default: 'granted_at').
      * @returns {Promise<SharedWithMeResponse>}
      */
-    async fetchSharedWithMe({ resourceTypes = ['file', 'folder'], limit = 50, cursor } = {}) {
+    async fetchSharedWithMe({ resourceTypes = ['file', 'folder'], limit = 50, cursor, orderBy } = {}) {
         const params = new URLSearchParams({
             limit: String(limit),
             resource_types: resourceTypes.join(',')
         });
         if (cursor) params.set('cursor', cursor);
+        if (orderBy) params.set('sort_by', orderBy);
 
         const response = await fetch(`/api/grants/incoming/resources?${params}`);
 
