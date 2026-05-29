@@ -6,7 +6,7 @@ use axum::{
 };
 use serde::Deserialize;
 use std::sync::Arc;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use crate::application::dtos::display_helpers::{
     category_for, format_file_size, icon_class_for, icon_special_class_for,
@@ -47,6 +47,7 @@ pub async fn get_recent_items(
     Query(params): Query<GetRecentParams>,
 ) -> impl IntoResponse {
     let user_id = auth_user.id;
+    warn!("Deprecated endpoint called: GET /api/recent — use GET /api/recent/resources instead");
 
     match recent_service.get_recent_items(user_id, params.limit).await {
         Ok(items) => {
