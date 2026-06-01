@@ -684,6 +684,34 @@ impl SmtpConfig {
     }
 }
 
+/// Magic-link authentication configuration. Knobs that are specific to
+/// the invite-by-email / login-via-email flow.
+#[derive(Debug, Clone)]
+pub struct MagicLinkConfig {
+    /// How long a freshly-minted magic-link token stays valid before the
+    /// background sweeper marks it expired. Default: 24 hours.
+    pub ttl_hours: u64,
+    /// Kill switch for the whole magic-link flow. When `false`:
+    /// - `POST /api/grants` rejects `subject.type = "email"` for unknown
+    ///   email addresses (no lazy external-user creation).
+    /// - `POST /api/auth/magic-link/send` returns the uniform stub
+    ///   response without actually issuing a token.
+    ///
+    /// This is the coarser "turn it all off" switch; the future
+    /// `OXICLOUD_EXTERNAL_EMAIL_DOMAINS` allowlist is the fine-grained
+    /// version.
+    pub allow_external_users: bool,
+}
+
+impl Default for MagicLinkConfig {
+    fn default() -> Self {
+        Self {
+            ttl_hours: 24,
+            allow_external_users: true,
+        }
+    }
+}
+
 /// Feature configuration (feature flags)
 #[derive(Debug, Clone)]
 pub struct FeaturesConfig {
@@ -747,6 +775,8 @@ pub struct AppConfig {
     pub nextcloud: NextcloudConfig,
     /// Outbound SMTP configuration (magic-link invitations, etc.)
     pub smtp: SmtpConfig,
+    /// Magic-link authentication configuration (TTL, external-users kill switch)
+    pub magic_link: MagicLinkConfig,
 }
 
 impl Default for AppConfig {
@@ -768,6 +798,7 @@ impl Default for AppConfig {
             wopi: WopiConfig::default(),
             nextcloud: NextcloudConfig::default(),
             smtp: SmtpConfig::default(),
+            magic_link: MagicLinkConfig::default(),
         }
     }
 }
@@ -1260,6 +1291,17 @@ impl AppConfig {
                 "OXICLOUD_SMTP_TLS=none — outbound mail will travel in plaintext. \
                  Use 'starttls' or 'tls' for production deployments."
             );
+        }
+
+        // Magic-link configuration
+        if let Ok(v) = env::var("OXICLOUD_MAGIC_LINK_TTL_HOURS")
+            && let Ok(h) = v.parse::<u64>()
+            && h > 0
+        {
+            config.magic_link.ttl_hours = h;
+        }
+        if let Ok(v) = env::var("OXICLOUD_ALLOW_EXTERNAL_USERS") {
+            config.magic_link.allow_external_users = v.parse::<bool>().unwrap_or(true);
         }
 
         config

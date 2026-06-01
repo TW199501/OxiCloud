@@ -392,9 +392,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             auth_middleware,
         ));
 
+        // Magic-link redemption — public, no CSRF, no rate limit (the token IS
+        // the credential and `mark_used` is single-use). PR 12 will add a
+        // per-IP limiter on top.
+        let magic_link_router = interfaces::api::handlers::magic_link_handler::magic_link_routes()
+            .with_state(app_state.clone());
+
         app = Router::new()
             // Health / readiness probes — no auth, mounted at root
             .merge(health_routes)
+            // Magic-link redemption — top-level, no `/api/` prefix
+            .merge(magic_link_router)
             // Rate-limited auth endpoints (login, register, refresh)
             .nest("/api/auth", auth_login)
             .nest("/api/auth", auth_register)

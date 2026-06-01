@@ -2,51 +2,72 @@
 //!
 //! Houses the lifecycle hook for grant-only external users — recipients
 //! authenticating via magic-link, OIDC-only, or OCM federation rather than
-//! a local password. Today the module ships only a **stubbed
-//! `ExternalIdentityLifecycleHook`**: it's registered on the dispatcher
-//! so the slot exists in DI, but every method is an explicit `Ok(())`
-//! no-op. The magic-link PR sequence will fill in the bodies.
+//! a local password. PR 8 populates two of the four hook methods:
 //!
-//! # What the populated hook will do (forward reference)
+//! | Event             | Today's action                                     |
+//! |-------------------|----------------------------------------------------|
+//! | `on_user_created` | Audit event when the new user is external          |
+//! | `on_user_login`   | Audit event when the logging-in user is external   |
+//! | `on_user_logout`  | `Ok(())` — provenance is connection-level          |
+//! | `on_user_deleted` | Explicit cleanup of outstanding magic-link tokens  |
 //!
-//! A future `auth.user_external_identity` side-table will store provenance
-//! per external user:
+//! The token cleanup on deletion is technically redundant with the
+//! `ON DELETE CASCADE` FK on `auth.magic_link_tokens.user_id`, but
+//! calling it explicitly lets us:
+//!   - Emit a single audit event with the row count.
+//!   - Run inside the same transaction as the user DELETE so a hook
+//!     failure aborts the whole thing (matches the `on_user_deleted`
+//!     contract — see `user_lifecycle.rs` tip #7).
 //!
-//! ```text
-//! user_id           UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE
-//! source            TEXT NOT NULL CHECK (source IN ('magic_link','oidc','ocm'))
-//! issuer            TEXT     -- OIDC iss URL or OCM partner FQDN
-//! external_sub      TEXT     -- OIDC sub or OCM remote user id; NULL for magic_link
-//! last_verified_at  TIMESTAMPTZ NOT NULL DEFAULT now()
-//! UNIQUE (source, issuer, external_sub)
-//! ```
+//! # Future work
 //!
-//! Then this hook will:
+//! A future `auth.user_external_identity` side-table will store
+//! provenance per external user (source, issuer, external_sub,
+//! last_verified_at). When that lands, this hook will:
+//!   - `on_user_created` → INSERT the provenance row.
+//!   - `on_user_login` → UPDATE `last_verified_at`.
+//!   - `on_user_deleted` → no extra work (FK CASCADE handles it).
 //!
-//! | Event             | Action |
-//! |-------------------|--------|
-//! | `on_user_created` | If `user.is_external()`, INSERT a row into `auth.user_external_identity` with the source/issuer/sub captured from the create flow (magic-link bootstrap, OIDC JIT, OCM federation). |
-//! | `on_user_login`   | If `user.is_external()`, `UPDATE … SET last_verified_at = NOW()` for the user's provenance row. Used by the GDPR sweeper to identify "external users we haven't heard from in 13 months". |
-//! | `on_user_logout`  | `Ok(())` — provenance is connection-level, not session-level. |
-//! | `on_user_deleted` | `Ok(())` — the FK CASCADE on `user_external_identity.user_id` handles row removal. |
-//!
-//! Today (PR 5): all four methods return `Ok(())` so the dispatcher
-//! exercises the registration path without any side effect.
+//! The current implementation reserves the slot without committing to
+//! the schema yet.
+
+use std::sync::Arc;
 
 use async_trait::async_trait;
 
 use crate::application::ports::user_lifecycle::{DeletionMode, LogoutReason, UserLifecycleHook};
 use crate::common::errors::DomainError;
 use crate::domain::entities::user::User;
+use crate::domain::repositories::magic_link_token_repository::MagicLinkTokenRepository;
 
-/// **Stubbed for now.** Populates the future `auth.user_external_identity`
-/// side-table when the magic-link / external-user flow ships. Registered
-/// on the dispatcher today as a no-op so the magic-link PR doesn't need to
-/// touch DI — it only fills in the hook body.
-///
-/// All four `UserLifecycleHook` methods are explicit `Ok(())` per the
-/// "no defaults — every event acknowledged" convention.
-pub struct ExternalIdentityLifecycleHook;
+pub struct ExternalIdentityLifecycleHook {
+    /// `None` when the magic-link feature is disabled in this build —
+    /// the cleanup path becomes a no-op. Production DI always wires this.
+    magic_link_repo: Option<Arc<dyn MagicLinkTokenRepository>>,
+}
+
+impl ExternalIdentityLifecycleHook {
+    /// Construct a no-op hook. Used by test stubs that don't exercise
+    /// the magic-link path.
+    pub fn new() -> Self {
+        Self {
+            magic_link_repo: None,
+        }
+    }
+
+    /// Wire the magic-link token repo. Called by DI when the magic-link
+    /// feature is enabled (PR 8 onwards).
+    pub fn with_magic_link_repo(mut self, repo: Arc<dyn MagicLinkTokenRepository>) -> Self {
+        self.magic_link_repo = Some(repo);
+        self
+    }
+}
+
+impl Default for ExternalIdentityLifecycleHook {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 #[async_trait]
 impl UserLifecycleHook for ExternalIdentityLifecycleHook {
@@ -54,33 +75,64 @@ impl UserLifecycleHook for ExternalIdentityLifecycleHook {
         "external_identity"
     }
 
-    async fn on_user_created(&self, _user: &User) -> Result<(), DomainError> {
-        // STUB: magic-link / OIDC JIT / OCM bootstrap PR will INSERT the
-        // provenance row here when `user.is_external()`.
+    async fn on_user_created(&self, user: &User) -> Result<(), DomainError> {
+        // Only externals are interesting to this hook — internal users go
+        // through the regular registration path that the audit hook
+        // already records. Future PRs (provenance side-table) will turn
+        // this into a SQL INSERT.
+        if user.is_external() {
+            tracing::info!(
+                target: "audit",
+                event = "external_user.created",
+                user_id = %user.id(),
+                username = %user.username(),
+                email = %user.email(),
+            );
+        }
         Ok(())
     }
 
-    async fn on_user_login(&self, _user: &User) -> Result<(), DomainError> {
-        // STUB: magic-link PR will UPDATE `last_verified_at` here so the
-        // GDPR sweeper can identify dormant external users.
+    async fn on_user_login(&self, user: &User) -> Result<(), DomainError> {
+        if user.is_external() {
+            tracing::info!(
+                target: "audit",
+                event = "external_user.login",
+                user_id = %user.id(),
+                username = %user.username(),
+                first_login = user.last_login_at().is_none(),
+            );
+        }
         Ok(())
     }
 
     async fn on_user_logout(&self, _user: &User, _reason: LogoutReason) -> Result<(), DomainError> {
-        // Provenance is connection-level, not session-level — no work
-        // to do on logout even in the populated future version.
+        // Provenance is connection-level, not session-level. No work today.
         Ok(())
     }
 
     async fn on_user_deleted(
         &self,
-        _user: &User,
+        user: &User,
         _mode: DeletionMode,
-        _tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     ) -> Result<(), DomainError> {
-        // FK CASCADE on `auth.user_external_identity.user_id` will
-        // handle row removal automatically — no work needed here even
-        // in the populated future version.
+        // Best-effort cleanup of outstanding magic-link tokens. The
+        // `ON DELETE CASCADE` on the FK would handle this automatically
+        // after the user row is removed — calling it explicitly inside
+        // the same transaction lets us record an audit count, and
+        // ensures the cleanup is visible to any subsequent hook in the
+        // same dispatcher chain.
+        if let Some(repo) = &self.magic_link_repo {
+            let removed = repo.delete_all_for_user_tx(user.id(), tx).await?;
+            if removed > 0 {
+                tracing::info!(
+                    target: "audit",
+                    event = "external_user.tokens_cleared",
+                    user_id = %user.id(),
+                    tokens_removed = removed,
+                );
+            }
+        }
         Ok(())
     }
 }

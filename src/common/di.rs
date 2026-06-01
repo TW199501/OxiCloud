@@ -711,17 +711,29 @@ impl AppServiceFactory {
             //                                       delete (with audit) —
             //                                       replaces the silent FK
             //                                       CASCADE.
-            //   5. ExternalIdentityLifecycleHook  — STUB. No-op for every
-            //                                       event today; the
-            //                                       magic-link / OIDC-only /
-            //                                       OCM PR will fill it in
-            //                                       to populate
-            //                                       `auth.user_external_identity`.
+            //   5. ExternalIdentityLifecycleHook  — audit + magic-link
+            //                                       token cleanup. Logs an
+            //                                       audit event for any
+            //                                       external user that gets
+            //                                       created or logs in;
+            //                                       transactionally clears
+            //                                       outstanding magic-link
+            //                                       tokens on delete (so a
+            //                                       new user reusing the
+            //                                       same id can never
+            //                                       inherit an old token).
             //                                       Last in the chain so it
-            //                                       observes the latest user
-            //                                       state before the chain
-            //                                       commits.
+            //                                       observes the latest
+            //                                       user state before the
+            //                                       chain commits.
             let session_repo_for_hook = Arc::new(SessionPgRepository::new(pool.clone()));
+            let magic_link_repo: Arc<
+                dyn crate::domain::repositories::magic_link_token_repository::MagicLinkTokenRepository,
+            > = Arc::new(
+                crate::infrastructure::repositories::pg::MagicLinkTokenPgRepository::new(
+                    pool.clone(),
+                ),
+            );
             let user_lifecycle = Arc::new(
                 crate::application::services::user_lifecycle_service::UserLifecycleService::new()
                     .with_hook(Arc::new(
@@ -743,7 +755,8 @@ impl AppServiceFactory {
                         ),
                     ))
                     .with_hook(Arc::new(
-                        crate::application::services::external_identity_service::ExternalIdentityLifecycleHook,
+                        crate::application::services::external_identity_service::ExternalIdentityLifecycleHook::new()
+                            .with_magic_link_repo(magic_link_repo.clone()),
                     )),
             );
 

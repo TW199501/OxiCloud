@@ -9,8 +9,10 @@ use crate::application::ports::user_lifecycle::{DeletionMode, LogoutReason};
 use crate::application::services::user_lifecycle_service::UserLifecycleService;
 use crate::common::config::OidcConfig;
 use crate::common::errors::{DomainError, ErrorKind};
+use crate::domain::entities::magic_link_token::{MagicLinkResourceKind, MagicLinkStatus};
 use crate::domain::entities::session::Session;
 use crate::domain::entities::user::{User, UserRole};
+use crate::domain::repositories::magic_link_token_repository::MagicLinkTokenRepository;
 use crate::infrastructure::repositories::pg::SessionPgRepository;
 use crate::infrastructure::repositories::pg::UserPgRepository;
 use crate::infrastructure::services::jwt_service::JwtTokenService;
@@ -37,6 +39,17 @@ pub enum OidcCallbackResult {
         user_id: Uuid,
         username: String,
     },
+}
+
+/// Outcome of a successful magic-link redemption. The auth tokens are
+/// the same shape as a password login; the optional resource fields tell
+/// the handler whether to deep-link to the invited resource or fall back
+/// to the generic `/shared-with-me` landing.
+#[derive(Debug, Clone)]
+pub struct MagicLinkRedemption {
+    pub auth: AuthResponseDto,
+    pub resource_kind: Option<MagicLinkResourceKind>,
+    pub resource_id: Option<Uuid>,
 }
 
 /// Tracks a pending OIDC authorization flow (CSRF + PKCE + nonce)
@@ -86,6 +99,9 @@ pub struct AuthApplicationService {
     /// Pending one-time token codes for secure token delivery after OIDC callback.
     /// Auto-expires after 60 seconds via moka TTL; max 10 000 entries for DoS protection.
     pending_oidc_tokens: Cache<String, PendingOidcToken>,
+    /// Magic-link token repository — populated when the magic-link feature
+    /// is enabled (PR 8+). `None` means redemption endpoints return 503.
+    magic_link_repo: Option<Arc<dyn MagicLinkTokenRepository>>,
 }
 
 impl AuthApplicationService {
@@ -115,7 +131,22 @@ impl AuthApplicationService {
                 .max_capacity(10_000)
                 .time_to_live(Duration::from_secs(60))
                 .build(),
+            magic_link_repo: None,
         }
+    }
+
+    /// Wire the magic-link token repository. Called from the DI factory
+    /// when the magic-link feature is configured. Mirrors the
+    /// `with_oidc` / `with_user_lifecycle` builder pattern.
+    pub fn with_magic_link_repo(mut self, repo: Arc<dyn MagicLinkTokenRepository>) -> Self {
+        self.magic_link_repo = Some(repo);
+        self
+    }
+
+    /// Whether magic-link redemption is wired. Handlers should check this
+    /// before attempting to redeem a token; `false` → return 503.
+    pub fn magic_link_enabled(&self) -> bool {
+        self.magic_link_repo.is_some()
     }
 
     /// Returns the default quota for the given role, capped to the available
@@ -450,6 +481,125 @@ impl AuthApplicationService {
             refresh_token,
             token_type: "Bearer".to_string(),
             expires_in: self.token_service.refresh_token_expiry_secs(),
+        })
+    }
+
+    /// Redeem a magic-link token and emit a fresh session in one shot.
+    ///
+    /// The flow:
+    /// 1. Look up the token in the repo. Unknown token → `NotFound`.
+    /// 2. Atomically transition `Pending → Used` via the repo's
+    ///    `mark_used()` (single SQL UPDATE with `WHERE status='pending'`).
+    ///    A second redemption attempt receives `Ok(false)` and is rejected
+    ///    as `AccessDenied`.
+    /// 3. Load the user, verify they're active.
+    /// 4. Dispatch `on_user_login` (so HomeFolderLifecycleHook can
+    ///    safety-net any internal user whose first credential happens
+    ///    to be a magic link — externals short-circuit by `is_external()`).
+    /// 5. Register login + persist + issue session in the same pipeline
+    ///    as password login.
+    ///
+    /// The returned `MagicLinkRedemption` carries the resource target so
+    /// the handler can build the redirect URL.
+    ///
+    /// Returns `ServiceUnavailable` (mapped from `NotImplemented`) when
+    /// the magic-link repo isn't wired — the handler maps that to HTTP 503.
+    pub async fn redeem_magic_link(&self, token: &str) -> Result<MagicLinkRedemption, DomainError> {
+        let repo = self.magic_link_repo.as_ref().ok_or_else(|| {
+            DomainError::new(
+                ErrorKind::NotImplemented,
+                "MagicLink",
+                "magic-link feature is not configured on this server",
+            )
+        })?;
+
+        let mlt = repo.find_by_token(token).await?.ok_or_else(|| {
+            DomainError::new(
+                ErrorKind::NotFound,
+                "MagicLink",
+                "unknown or invalid magic link",
+            )
+        })?;
+
+        // Friendly early-rejection messages. The atomic `mark_used`
+        // below is the canonical single-use guard.
+        if mlt.status() == MagicLinkStatus::Used {
+            return Err(DomainError::new(
+                ErrorKind::AccessDenied,
+                "MagicLink",
+                "this magic link has already been used",
+            ));
+        }
+        if mlt.is_expired() {
+            return Err(DomainError::new(
+                ErrorKind::AccessDenied,
+                "MagicLink",
+                "this magic link has expired",
+            ));
+        }
+
+        let consumed = repo.mark_used(mlt.id()).await?;
+        if !consumed {
+            // Either a concurrent redemption beat us, or the row was
+            // marked expired by the sweeper between our find and update.
+            return Err(DomainError::new(
+                ErrorKind::AccessDenied,
+                "MagicLink",
+                "this magic link has already been used",
+            ));
+        }
+
+        let mut user = self.user_storage.get_user_by_id(mlt.user_id()).await?;
+        if !user.is_active() {
+            return Err(DomainError::new(
+                ErrorKind::AccessDenied,
+                "Auth",
+                "Account deactivated",
+            ));
+        }
+
+        // Dispatch BEFORE register_login so hooks observing
+        // `last_login_at().is_none()` see "first ever login" correctly.
+        if let Some(lc) = &self.user_lifecycle {
+            lc.dispatch_login(&user).await;
+        }
+        user.register_login();
+        self.user_storage.update_user(user.clone()).await?;
+
+        let access_token = self.token_service.generate_access_token(&user)?;
+        let refresh_token = self.token_service.generate_refresh_token();
+        let session = Session::new(
+            user.id(),
+            refresh_token.clone(),
+            None,
+            None,
+            self.token_service.refresh_token_expiry_days(),
+            Uuid::new_v4(),
+        );
+        self.session_storage.create_session(session).await?;
+
+        tracing::info!(
+            target: "audit",
+            event = "magic_link.redeemed",
+            user_id = %user.id(),
+            username = %user.username(),
+            is_external = user.is_external(),
+            resource_kind = ?mlt.resource_kind(),
+            resource_id = ?mlt.resource_id(),
+        );
+
+        let auth = AuthResponseDto {
+            user: UserDto::from(user),
+            access_token,
+            refresh_token,
+            token_type: "Bearer".to_string(),
+            expires_in: self.token_service.refresh_token_expiry_secs(),
+        };
+
+        Ok(MagicLinkRedemption {
+            auth,
+            resource_kind: mlt.resource_kind(),
+            resource_id: mlt.resource_id(),
         })
     }
 
