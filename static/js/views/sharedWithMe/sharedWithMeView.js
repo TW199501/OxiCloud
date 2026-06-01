@@ -13,7 +13,7 @@
 import { ui } from '../../app/ui.js';
 import { ResourceListComponent } from '../../components/resourceList.js';
 import { createUserVignette } from '../../components/userVignette.js';
-import { normalizeDateBucket, sizeBucket } from '../../core/formatters.js';
+import { normalizeDateBucket } from '../../core/formatters.js';
 import { i18n } from '../../core/i18n.js';
 import * as viewPrefs from '../../core/viewPrefs.js';
 import { batchToolbar } from '../../features/files/batchToolbar.js';
@@ -105,23 +105,14 @@ const GROUP_BY_DEFS = [
             return labels[key] ?? key;
         }
     },
-    {
-        key: 'size',
-        get label() {
-            return i18n.t('groupby.size', 'Size');
-        },
-        icon: 'fas fa-layer-group',
-        orderBy: 'size',
-        // keyFn: the key IS the bucket label returned by sizeBucket(), so no
-        // separate labelFn is needed (same pattern as shareDate).
-        // Folders have no size — sizeBucket(-1) returns the "Folders" label.
-        keyFn: (item) => {
-            if (!('mime_type' in item)) return sizeBucket(-1);
-            const r = /** @type {Record<string,number>} */ (/** @type {unknown} */ (item));
-            return sizeBucket(r.size ?? 0);
-        }
-        // No labelFn: keyFn already returns the human-readable label.
-    },
+    // NOTE: there is no "Size" group-by here. The backend
+    // (`grant_handler::list_incoming_resources` at line ~354) rejects
+    // `sort_by=size` with a 400 — only `granted_at | granted_by | name |
+    // type` are valid for the incoming endpoint. A `size` entry used to
+    // live here and silently produced 400s on every selection. If you
+    // need it back, also add the matching branch in
+    // `pg_acl_engine::list_incoming_resources_paged` and widen the
+    // handler's allowlist.
     {
         key: 'shareDate',
         get label() {
