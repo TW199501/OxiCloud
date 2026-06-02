@@ -21,6 +21,7 @@ import * as itemTooltip from '../../features/itemTooltip.js';
 import { favorites } from '../../features/library/favorites.js';
 import { grants } from '../../model/grants.js';
 import { systemUsers } from '../../model/systemUsers.js';
+import { attachInfiniteScroll } from '../../utils/infiniteScroll.js';
 
 /** @import {SharedWithMeItem, FileItem, FolderItem, ResourceTypeEnum} from '../../core/types.js' */
 
@@ -438,6 +439,8 @@ const sharedWithMeView = {
 
         wrapper.appendChild(btn);
         filesContainer.after(wrapper);
+
+        attachInfiniteScroll(wrapper, () => this._loadPage());
     },
 
     /**

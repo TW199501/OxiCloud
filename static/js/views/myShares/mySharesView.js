@@ -19,6 +19,7 @@ import * as viewPrefs from '../../core/viewPrefs.js';
 import * as itemTooltip from '../../features/itemTooltip.js';
 import { grants } from '../../model/grants.js';
 import { groups } from '../../model/groups.js';
+import { attachInfiniteScroll } from '../../utils/infiniteScroll.js';
 
 /** @import {FileItem, FolderItem} from '../../core/types.js' */
 
@@ -256,6 +257,8 @@ const mySharesView = {
 
         wrapper.appendChild(btn);
         filesContainer.after(wrapper);
+
+        attachInfiniteScroll(wrapper, () => this._loadPage());
     },
 
     /** @param {boolean} visible */

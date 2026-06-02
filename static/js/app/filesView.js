@@ -24,6 +24,7 @@ import { inlineViewer } from '../features/files/inlineViewer.js';
 import { favorites } from '../features/library/favorites.js';
 import { fetchResourcesPage, rebuildBreadCrumb } from '../model/filesModel.js';
 import { grants } from '../model/grants.js';
+import { attachInfiniteScroll } from '../utils/infiniteScroll.js';
 import { resolveHomeFolder } from './authSession.js';
 import { updateHistory } from './main.js';
 import { app } from './state.js';
@@ -289,6 +290,8 @@ function _ensureLoadMoreButton() {
 
     wrapper.appendChild(btn);
     filesContainer.after(wrapper);
+
+    attachInfiniteScroll(wrapper, () => _loadPage({ isFirstPage: false }));
 }
 
 /**

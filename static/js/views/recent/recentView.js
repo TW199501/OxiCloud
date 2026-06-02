@@ -28,6 +28,7 @@ import * as itemTooltip from '../../features/itemTooltip.js';
 import { favorites } from '../../features/library/favorites.js';
 import { fetchRecentPage } from '../../model/recentModel.js';
 import { systemUsers } from '../../model/systemUsers.js';
+import { attachInfiniteScroll } from '../../utils/infiniteScroll.js';
 
 /** @import {FileItem, FolderItem, ResourceTypeEnum} from '../../core/types.js' */
 
@@ -436,6 +437,8 @@ const recentView = {
 
         wrapper.appendChild(btn);
         filesContainer.after(wrapper);
+
+        attachInfiniteScroll(wrapper, () => this._loadPage());
     },
 
     /**

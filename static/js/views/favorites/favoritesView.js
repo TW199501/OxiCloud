@@ -27,6 +27,7 @@ import * as itemTooltip from '../../features/itemTooltip.js';
 import { favorites } from '../../features/library/favorites.js';
 import { fetchFavoritesPage } from '../../model/favoritesModel.js';
 import { systemUsers } from '../../model/systemUsers.js';
+import { attachInfiniteScroll } from '../../utils/infiniteScroll.js';
 
 /** @import {FavoritesResourceItem, FileItem, FolderItem, ResourceTypeEnum} from '../../core/types.js' */
 
@@ -429,6 +430,8 @@ const favoritesView = {
 
         wrapper.appendChild(btn);
         filesContainer.after(wrapper);
+
+        attachInfiniteScroll(wrapper, () => this._loadPage());
     },
 
     /**

@@ -24,6 +24,7 @@ import * as viewPrefs from '../../core/viewPrefs.js';
 import { fileOps } from '../../features/files/fileOperations.js';
 import * as itemTooltip from '../../features/itemTooltip.js';
 import { fetchTrashPage } from '../../model/trashModel.js';
+import { attachInfiniteScroll } from '../../utils/infiniteScroll.js';
 
 /** @import {FileItem, FolderItem, ResourceTypeEnum, TrashResourceItem} from '../../core/types.js' */
 
@@ -449,6 +450,8 @@ const trashView = {
 
         wrapper.appendChild(btn);
         filesContainer.after(wrapper);
+
+        attachInfiniteScroll(wrapper, () => this._loadPage());
     },
 
     /**
