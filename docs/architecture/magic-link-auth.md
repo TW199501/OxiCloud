@@ -131,6 +131,10 @@ Every denial or rejection in the magic-link path emits a structured event on the
 | `auth.magic_link_redeem`           | `redeemed`, `token_not_found`, `token_used`, `token_expired`, `account_deactivated`               | `MagicLinkInviteService::redeem`                         |
 | `user_profile.rejected`            | `external_no_relationship`, `target_external_hidden`, `target_hidden`                              | `AuthApplicationService::get_user_profile`               |
 | `grants.email_invite`              | `rate_limited`                                                                                    | `grant_handler::create_grant`                            |
+| `authz.external_user_blocked`      | `internal_only_surface`                                                                            | `require_internal_user_layer` (CalDAV / CardDAV / WebDAV) |
+| `auth.nc_basic_rejected`           | `external_user`                                                                                    | `basic_auth_middleware` (NC Basic-Auth surface)          |
+| `auth.app_password_create_rejected`| `external_user`                                                                                    | `create_app_password`                                    |
+| `groups.search_rejected`           | `external_user`                                                                                    | `search_groups`                                          |
 
 The convention (see CLAUDE.md § Authorization) is: any branch that denies or rejects a request **must** emit an audit event before returning the user-facing response. Anti-enumeration is preserved at the API surface (uniform response shape, 404 not 403), and the true reason is recorded only in the audit channel.
 
@@ -155,15 +159,32 @@ The per-IP backstop respects `OXICLOUD_TRUST_PROXY_CIDR` for client IP resolutio
 
 ## Defence-in-depth boundary protections
 
-External users are a new principal kind, and several pre-existing surfaces would over-share once they appeared. Three protections close those gaps:
+External users are a new principal kind, and several pre-existing surfaces would over-share once they appeared. The protections fall in two layers — service-level filters that every surface inherits, and route-level layers that close protocol surfaces with no semantic meaning for externals.
+
+### Service-layer filters (every surface inherits these)
 
 1. **Subject groups reject external members.** `subject_group_service.rs::add_member` short-circuits if the candidate user has `is_external = TRUE`. Otherwise an admin could add `alice@example.com` to "Engineering", which later receives a grant on internal-only resources — silent privilege escalation. Mirrors the no-external-admins enforcement.
 2. **System contacts hide externals by default.** `auth_service.list_users` and `auth_service.search_users` take `include_external: bool`, defaulting to `false`. The share modal autocomplete (via `/api/address-books/system/contacts`) therefore never surfaces external users to internal callers, and external users never see internal users at the address book layer.
 3. **External users are excluded from the Internal virtual group.** `pg_acl_engine.rs::expand_user` no longer inserts `INTERNAL_GROUP_ID` for users with `is_external = TRUE`. The group's name finally honours its semantics; every grant addressed to "all internal users" is now genuinely internal-only.
 
-These three protections all activate at the **service layer**, so every protocol surface (REST, WebDAV, CalDAV, NextCloud) inherits them automatically.
+### Route-level lockouts (close protocol surfaces upfront)
+
+External users have no calendar, no address book, no home folder, and (by design) no persistent credential. The protocol surfaces that assume those things are closed to them at the middleware layer — before any handler runs:
+
+4. **`/caldav/*`, `/carddav/*`, `/webdav/*`** are wrapped with `require_internal_user_layer` in `main.rs`. The layer runs after `auth_middleware`, reads the populated `CurrentUser` from request extensions, calls `require_internal_user` once per request, and 403s + audit-logs on rejection. PROPFIND / REPORT / OPTIONS — every DAV verb is closed.
+5. **NextCloud `/remote.php/*` and `/ocs/*`** are gated inside `basic_auth_middleware`: after a successful app-password match, a follow-up lookup checks `is_external` and returns 401 if true. This is belt-and-braces — externals can't create app passwords in the first place (next item) — but it covers users who later flip to `is_external` after creating one.
+6. **`POST /api/auth/app-passwords` is closed.** App passwords are persistent credentials; the magic-link-eligibility rule (`has_login_credential`) assumes externals have **no other credential configured**. Letting an external mint an app password would break that invariant and would also be the only way to authenticate them on the NC surface. 403 + audit on rejection.
+7. **`GET /api/groups/search` is closed.** Group names aren't strictly secret, but externals have no legitimate use for the share-dialog autocomplete (they can't be added to groups anyway).
 
 Pre-existing safeguards from the user-lifecycle work continue to apply: the DB CHECK constraints `users_external_not_admin` and `users_external_no_storage`, and the `HomeFolderLifecycleHook` short-circuit that skips home-folder provisioning for externals.
+
+### Why protocol-level instead of handler-level
+
+The route layer is one `require_internal_user_layer` per nest rather than one check per handler. Three reasons:
+
+- **Coverage.** Every DAV verb (and every NC OCS endpoint) is gated in one place. New handlers added under the same nest inherit the protection automatically.
+- **Cost.** The layer hits the DB once per request (already cached in moka under the hood); a per-handler check would do the same work without the reuse.
+- **Auditability.** A single audit event (`authz.external_user_blocked` with the request `path`) covers the whole subtree. Operators can grep one `event=` value across all DAV traffic.
 
 ## Kill switches and feature scoping
 

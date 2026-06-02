@@ -258,9 +258,28 @@ pub async fn search_groups(
     headers: HeaderMap,
     Query(q): Query<SearchGroupsQuery>,
 ) -> Result<impl IntoResponse, AppError> {
-    // Any authenticated user can discover groups for the share dialog —
-    // membership lists remain admin-only via list_members.
-    let (_caller_id, role) = require_authenticated(&state, &headers).await?;
+    // Any authenticated INTERNAL user can discover groups for the
+    // share dialog — membership lists remain admin-only via
+    // list_members. External users have no business enumerating
+    // groups; defence-in-depth on top of the ReBAC layer (which
+    // already prevents them from being added to any group anyway).
+    let (caller_id, role) = require_authenticated(&state, &headers).await?;
+    if let Some(auth_svc) = state.auth_service.as_ref()
+        && let Err(err) = crate::interfaces::middleware::user::require_internal_user(
+            &auth_svc.auth_application_service,
+            caller_id,
+        )
+        .await
+    {
+        tracing::info!(
+            target: "audit",
+            event = "groups.search_rejected",
+            reason = "external_user",
+            caller_id = %caller_id,
+            "👮🏻‍♂️ External user blocked from /api/groups/search"
+        );
+        return Err(err);
+    }
     let can_manage = role == "admin";
     let svc = service(&state)?;
     // The share-dialog autocomplete doesn't render a member-count chip, so

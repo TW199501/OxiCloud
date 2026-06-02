@@ -239,6 +239,48 @@ Authorization: Bearer {{bob_access_token}}
 
 HTTP 404
 
+# 11f — bob CANNOT create an app password. Externals are
+#        magic-link-only; an app password would be a persistent
+#        credential bypassing has_login_credential().
+POST {{base_url}}/api/auth/app-passwords
+Authorization: Bearer {{bob_access_token}}
+Content-Type: application/json
+{ "label": "rogue" }
+
+HTTP 403
+
+# 11g — bob CANNOT enumerate groups via the share-dialog endpoint.
+#        Defence-in-depth on top of the ReBAC layer (externals can't
+#        be group members today anyway).
+GET {{base_url}}/api/groups/search?q=any
+Authorization: Bearer {{bob_access_token}}
+
+HTTP 403
+
+# 11h — bob CANNOT reach the WebDAV protocol surface. He has no home
+#        folder, so the protocol has no semantic meaning for him.
+#        Layered before the handler so even malformed PROPFIND is
+#        rejected upfront.
+PROPFIND {{base_url}}/webdav/
+Authorization: Bearer {{bob_access_token}}
+Depth: 0
+
+HTTP 403
+
+# 11i — bob CANNOT reach the CalDAV surface. No calendar.
+PROPFIND {{base_url}}/caldav/
+Authorization: Bearer {{bob_access_token}}
+Depth: 0
+
+HTTP 403
+
+# 11j — bob CANNOT reach the CardDAV surface. No personal address book.
+PROPFIND {{base_url}}/carddav/
+Authorization: Bearer {{bob_access_token}}
+Depth: 0
+
+HTTP 403
+
 
 # ─────────────────────────────────────────────────────────────
 # Step 12 — /api/users/{id} happy path (Alice → Bob).

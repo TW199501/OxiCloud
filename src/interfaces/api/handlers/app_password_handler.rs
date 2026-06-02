@@ -24,12 +24,42 @@ pub fn app_password_routes() -> Router<Arc<AppState>> {
 /// POST /api/auth/app-passwords — Create a new app password.
 ///
 /// Returns the plain-text password ONCE. The user must copy it immediately.
+///
+/// External users are rejected with 403: app passwords are persistent
+/// credentials, and the magic-link-eligibility rule (`has_login_credential`)
+/// is built on the assumption that externals have NO other credential
+/// configured. Letting an external mint an app password would break that
+/// invariant — and the Basic-Auth surface (`/remote.php/*`, `/ocs/*`)
+/// has no semantic meaning for them anyway. See the
+/// [magic-link auth architecture page] for the full visibility model.
+///
+/// [magic-link auth architecture page]: ../../../../docs/architecture/magic-link-auth.md
 async fn create_app_password(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
     Json(request): Json<CreateAppPasswordRequestDto>,
 ) -> Result<Json<crate::application::dtos::app_password_dto::AppPasswordCreatedResponseDto>, AppError>
 {
+    // Gate externals BEFORE we touch the app_password_service. The
+    // service treats every authenticated caller equally; the policy
+    // that externals can't hold persistent credentials lives here.
+    if let Some(auth_svc) = state.auth_service.as_ref()
+        && let Err(err) = crate::interfaces::middleware::user::require_internal_user(
+            &auth_svc.auth_application_service,
+            user.id,
+        )
+        .await
+    {
+        tracing::info!(
+            target: "audit",
+            event = "auth.app_password_create_rejected",
+            reason = "external_user",
+            caller_id = %user.id,
+            "👮🏻‍♂️ External user blocked from creating an app password"
+        );
+        return Err(err);
+    }
+
     let service = state
         .app_password_service
         .as_ref()

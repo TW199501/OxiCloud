@@ -89,6 +89,31 @@ pub async fn basic_auth_middleware(
             if let Some(auth_svc) = state.auth_service.as_ref() {
                 auth_svc.login_lockout.record_success(&username);
             }
+            // External users must never authenticate against the NC
+            // surface — that whole subtree (WebDAV files, uploads,
+            // trashbin, OCS user info, sharees autocomplete, etc.) has
+            // no semantic meaning for a magic-link-only principal, and
+            // an app password would be a persistent credential
+            // bypassing the magic-link-eligibility rule. POST
+            // /api/auth/app-passwords also gates externals upfront;
+            // this is the belt-and-braces check in case one slipped
+            // through (e.g. user later flipped to is_external).
+            if let Some(auth_svc) = state.auth_service.as_ref()
+                && let Ok(user) = auth_svc
+                    .auth_application_service
+                    .get_user_by_id(user_id)
+                    .await
+                && user.is_external
+            {
+                tracing::info!(
+                    target: "audit",
+                    event = "auth.nc_basic_rejected",
+                    reason = "external_user",
+                    user_id = %user_id,
+                    "👮🏻‍♂️ External user attempted NC Basic auth — rejected"
+                );
+                return Err(NextcloudAuthError::Unauthorized);
+            }
             request.extensions_mut().insert(Arc::new(CurrentUser {
                 id: user_id,
                 username: uname,
