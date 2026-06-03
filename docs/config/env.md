@@ -217,6 +217,22 @@ Configures the invite-by-email and login-via-email flows. Both require SMTP to b
 | `OXICLOUD_ALLOW_EXTERNAL_USERS` | `true` | Kill switch for the whole flow. `false` makes `POST /api/grants` reject `subject.type = "email"` for unknown addresses and `POST /api/auth/magic-link/send` return its uniform stub without issuing a token. |
 | `OXICLOUD_EXTERNAL_EMAIL_DOMAINS` | — | Comma-separated allowlist of email domains accepted when minting a new external user (case-insensitive, exact match on the post-`@` part). Empty = any domain is allowed, subject to `OXICLOUD_ALLOW_EXTERNAL_USERS`. Subdomains must be listed explicitly: `partner.com` does NOT match `eng.partner.com`. Example: `partner-a.com,partner-b.io`. |
 
+## Internationalization (server-rendered surfaces)
+
+Server-rendered HTML pages (magic-link landing, error pages) and outbound transactional emails go through the backend i18n layer. The set of available locales is **discovered at boot** by listing `static/locales/*.json` — no rebuild needed to add a 17th locale.
+
+| Variable | Default | Description |
+|---|---|---|
+| `OXICLOUD_DEFAULT_LOCALE` | `en` | Fallback locale used when no stronger signal is available. Must match one of the locales under `static/locales/`; startup fails fast if you set it to a code with no corresponding JSON file. |
+
+The resolution priority differs by surface:
+
+- **HTML pages (anonymous, e.g. magic-link landing)** — `?lang=xx` query override, then the browser's `Accept-Language` header (q-weighted, with primary-tag fallback so `fr-FR` resolves to `fr` when no `fr-FR.json` is shipped), then this default.
+- **Emails to a known user** — the user's `preferred_locale` column (set via OIDC `locale` claim at JIT or via the UI language switcher), then this default.
+- **Emails to a brand-new external user being invited** — the inviter's `preferred_locale` (inheritance at row-creation), then this default.
+
+Today's shipped locales: `ar, de, en, es, fa, fr, hi, it, ja, ko, nl, pl, pt, ru, zh, zh-TW`. Missing translations on a non-English locale automatically fall back to English at the key level — adding a new locale with even a few translated keys works without manual gap-filling.
+
 ## Trusted Proxy
 
 | Variable | Default | Description |

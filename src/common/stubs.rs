@@ -340,6 +340,15 @@ impl I18nService for StubI18nService {
         Ok(String::new())
     }
 
+    async fn translate_args(
+        &self,
+        _key: &str,
+        _locale: Locale,
+        _args: &[(&str, &str)],
+    ) -> I18nResult<String> {
+        Ok(String::new())
+    }
+
     async fn load_translations(&self, _locale: Locale) -> I18nResult<()> {
         Ok(())
     }

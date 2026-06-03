@@ -14,18 +14,43 @@ pub struct LocaleDto {
 
 impl From<Locale> for LocaleDto {
     fn from(locale: Locale) -> Self {
-        let (code, name) = match locale {
-            Locale::English => ("en", "English"),
-            Locale::Spanish => ("es", "Español"),
-            Locale::French => ("fr", "Français"),
-            Locale::German => ("de", "Deutsch"),
-            Locale::Portuguese => ("pt", "Português"),
-        };
+        Self::from(&locale)
+    }
+}
 
-        Self {
-            code: code.to_string(),
-            name: name.to_string(),
-        }
+impl From<&Locale> for LocaleDto {
+    fn from(locale: &Locale) -> Self {
+        let code = locale.as_str().to_string();
+        let name = display_name_for(&code)
+            .map(str::to_string)
+            .unwrap_or_else(|| code.clone());
+        Self { code, name }
+    }
+}
+
+/// Endonym lookup for the locales shipped under `static/locales/`. New
+/// locales added in PR-A's `LocaleRegistry::discover` should be added
+/// here too; an unknown code falls back to itself, which is safe but
+/// looks rough in a language switcher.
+fn display_name_for(code: &str) -> Option<&'static str> {
+    match code {
+        "en" => Some("English"),
+        "es" => Some("Español"),
+        "fr" => Some("Français"),
+        "de" => Some("Deutsch"),
+        "pt" => Some("Português"),
+        "it" => Some("Italiano"),
+        "nl" => Some("Nederlands"),
+        "pl" => Some("Polski"),
+        "ru" => Some("Русский"),
+        "ja" => Some("日本語"),
+        "ko" => Some("한국어"),
+        "zh" => Some("中文"),
+        "zh-tw" => Some("繁體中文"),
+        "ar" => Some("العربية"),
+        "fa" => Some("فارسی"),
+        "hi" => Some("हिन्दी"),
+        _ => None,
     }
 }
 

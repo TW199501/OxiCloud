@@ -1,6 +1,7 @@
 pub mod admin;
 pub mod auth;
 pub mod csrf;
+pub mod locale;
 pub mod rate_limit;
 pub mod trace_span;
 pub mod trusted_proxy;

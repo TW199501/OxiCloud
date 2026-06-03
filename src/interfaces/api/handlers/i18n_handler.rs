@@ -51,11 +51,12 @@ impl I18nHandler {
             None => None,
         };
 
+        let resolved_locale = locale.clone().unwrap_or_default();
         match service.translate(&query.key, locale).await {
             Ok(text) => {
                 let response = TranslationResponseDto {
                     key: query.key,
-                    locale: locale.unwrap_or(Locale::default()).as_str().to_string(),
+                    locale: resolved_locale.as_str().to_string(),
                     text,
                 };
                 (StatusCode::OK, Json(response)).into_response()
@@ -75,7 +76,7 @@ impl I18nHandler {
 
                 let error = TranslationErrorDto {
                     key: query.key,
-                    locale: locale.unwrap_or(Locale::default()).as_str().to_string(),
+                    locale: resolved_locale.as_str().to_string(),
                     error: error_msg,
                 };
 

@@ -869,6 +869,36 @@ pub struct AppConfig {
     pub smtp: SmtpConfig,
     /// Magic-link authentication configuration (TTL, external-users kill switch)
     pub magic_link: MagicLinkConfig,
+    /// I18n configuration (default locale for server-rendered surfaces)
+    pub i18n: I18nConfig,
+}
+
+/// Server-side i18n knobs.
+///
+/// Locale discovery itself is driven by `static/locales/*.json` at boot
+/// (see [`crate::common::locale::LocaleRegistry`]) — no hardcoded list,
+/// no `build.rs`. This struct only carries the configurable defaults
+/// around that discovery.
+#[derive(Debug, Clone)]
+pub struct I18nConfig {
+    /// Fallback locale used when:
+    /// - an anonymous request's `Accept-Language` matches nothing in
+    ///   the registry,
+    /// - a user's `preferred_locale` is `NULL`,
+    /// - an OIDC `locale` claim doesn't resolve.
+    ///
+    /// Must be present in `static/locales/`; the registry-build step
+    /// errors at startup if this is set to a locale we don't ship.
+    /// Defaults to `"en"`. Override via `OXICLOUD_DEFAULT_LOCALE`.
+    pub default_locale: String,
+}
+
+impl Default for I18nConfig {
+    fn default() -> Self {
+        Self {
+            default_locale: "en".to_string(),
+        }
+    }
 }
 
 impl Default for AppConfig {
@@ -891,6 +921,7 @@ impl Default for AppConfig {
             nextcloud: NextcloudConfig::default(),
             smtp: SmtpConfig::default(),
             magic_link: MagicLinkConfig::default(),
+            i18n: I18nConfig::default(),
         }
     }
 }
@@ -1443,6 +1474,13 @@ impl AppConfig {
         }
         if let Ok(v) = env::var("OXICLOUD_MAGIC_LINK_OPEN_TO_PASSWORD_USERS") {
             config.magic_link.open_to_password_users = v == "true" || v == "1";
+        }
+
+        if let Ok(v) = env::var("OXICLOUD_DEFAULT_LOCALE") {
+            let trimmed = v.trim();
+            if !trimmed.is_empty() {
+                config.i18n.default_locale = trimmed.to_string();
+            }
         }
 
         config

@@ -1,5 +1,5 @@
 use sqlx::PgPool;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::application::ports::blob_storage_ports::BlobStorageBackend;
@@ -27,6 +27,7 @@ use crate::application::services::{
 };
 use crate::common::config::AppConfig;
 use crate::common::errors::DomainError;
+use crate::common::locale::LocaleRegistry;
 use crate::infrastructure::repositories::pg::SharePgRepository;
 use crate::infrastructure::repositories::pg::{
     FileBlobReadRepository, FileBlobWriteRepository, FileMetadataRepository, FolderDbRepository,
@@ -77,25 +78,53 @@ pub struct AppServiceFactory {
     storage_path: PathBuf,
     locales_path: PathBuf,
     config: AppConfig,
+    /// Validated set of locales discovered under `locales_path`. Built
+    /// once at factory construction time; consumed by the I18n service
+    /// and the `Accept-Language` extractor. See
+    /// [`crate::common::locale::LocaleRegistry`] for the discovery rules.
+    locale_registry: Arc<LocaleRegistry>,
 }
 
 impl AppServiceFactory {
     /// Creates a new service factory
     pub fn new(storage_path: PathBuf, locales_path: PathBuf) -> Self {
+        let config = AppConfig::default();
+        let locale_registry = Self::build_registry(&locales_path, &config);
         Self {
             storage_path,
             locales_path,
-            config: AppConfig::default(),
+            config,
+            locale_registry,
         }
     }
 
     /// Creates a new service factory with custom configuration
     pub fn with_config(storage_path: PathBuf, locales_path: PathBuf, config: AppConfig) -> Self {
+        let locale_registry = Self::build_registry(&locales_path, &config);
         Self {
             storage_path,
             locales_path,
             config,
+            locale_registry,
         }
+    }
+
+    /// Discover locales from disk at boot. A misconfigured default or
+    /// an empty locale directory is treated as a fatal config error —
+    /// fail fast so the operator notices at startup rather than when
+    /// the first magic-link mail is queued.
+    fn build_registry(locales_path: &Path, config: &AppConfig) -> Arc<LocaleRegistry> {
+        let registry = LocaleRegistry::discover(locales_path, &config.i18n.default_locale)
+            .unwrap_or_else(|e| {
+                panic!(
+                    "Failed to build locale registry from {}: {}. \
+                     Check OXICLOUD_DEFAULT_LOCALE and that static/locales/ \
+                     contains valid *.json files.",
+                    locales_path.display(),
+                    e
+                )
+            });
+        Arc::new(registry)
     }
 
     /// Gets the configuration
@@ -341,8 +370,12 @@ impl AppServiceFactory {
                 folder_repo_concrete.clone(),
             ));
 
-        // I18n repository
-        let i18n_repository = Arc::new(FileSystemI18nService::new(self.locales_path.clone()));
+        // I18n repository — file-system backed, gated by the locale
+        // registry built at factory construction.
+        let i18n_repository = Arc::new(FileSystemI18nService::new(
+            self.locales_path.clone(),
+            self.locale_registry.clone(),
+        ));
 
         // Trash repository — reads soft-delete flags from storage.files/folders
         let trash_repository = if core.config.features.enable_trash {
@@ -567,24 +600,16 @@ impl AppServiceFactory {
         service
     }
 
-    /// Preloads translations
+    /// Preloads translations for every locale in the registry. Build
+    /// the registry at startup via `LocaleRegistry::discover` and pass
+    /// the resulting list here.
     pub async fn preload_translations(&self, i18n_service: &I18nApplicationService) {
-        use crate::domain::services::i18n_service::Locale;
-
-        if let Err(e) = i18n_service.load_translations(Locale::English).await {
-            tracing::warn!("Failed to load English translations: {}", e);
-        }
-        if let Err(e) = i18n_service.load_translations(Locale::Spanish).await {
-            tracing::warn!("Failed to load Spanish translations: {}", e);
-        }
-        if let Err(e) = i18n_service.load_translations(Locale::French).await {
-            tracing::warn!("Failed to load French translations: {}", e);
-        }
-        if let Err(e) = i18n_service.load_translations(Locale::German).await {
-            tracing::warn!("Failed to load German translations: {}", e);
-        }
-        if let Err(e) = i18n_service.load_translations(Locale::Portuguese).await {
-            tracing::warn!("Failed to load Portuguese translations: {}", e);
+        let locales = i18n_service.available_locales().await;
+        for locale in locales {
+            let code = locale.as_str().to_string();
+            if let Err(e) = i18n_service.load_translations(locale).await {
+                tracing::warn!("Failed to load translations for {}: {}", code, e);
+            }
         }
         tracing::info!("Translations preloaded");
     }
@@ -883,6 +908,7 @@ impl AppServiceFactory {
             core,
             repositories: repos,
             applications: apps,
+            locale_registry: self.locale_registry.clone(),
             db_pool: Some(pool.clone()),
             maintenance_pool: Some(maintenance_pool),
             auth_service: auth_services,
@@ -1279,6 +1305,11 @@ pub struct AppState {
     pub core: CoreServices,
     pub repositories: RepositoryServices,
     pub applications: ApplicationServices,
+    /// Validated set of locales the server knows about. Surfaced to
+    /// handlers so the `Accept-Language` extractor and any
+    /// locale-validation code (OIDC JIT, profile-edit) can consult one
+    /// canonical list.
+    pub locale_registry: Arc<LocaleRegistry>,
     pub db_pool: Option<Arc<PgPool>>,
     /// Isolated pool for background / batch operations.
     pub maintenance_pool: Option<Arc<PgPool>>,
