@@ -2,6 +2,7 @@ pub mod api;
 pub mod errors;
 pub mod middleware;
 pub mod nextcloud;
+pub mod upload_spool;
 pub mod web;
 
 pub use api::create_api_routes;

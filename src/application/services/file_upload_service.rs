@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::application::dtos::file_dto::FileDto;
@@ -55,6 +55,9 @@ pub struct FileUploadService {
     content_cache: Option<Arc<FileContentCache>>,
     /// Single lifecycle dispatcher — fires on_file_created / on_file_updated.
     file_lifecycle_hook: Option<Arc<dyn FileLifecycleHook>>,
+    /// Directory for spool temp files (`&[u8]` upload variants). When `Some`,
+    /// keeps spools off tmpfs/RAM so they don't count against the cgroup limit.
+    upload_temp_dir: Option<PathBuf>,
 }
 
 impl FileUploadService {
@@ -66,6 +69,7 @@ impl FileUploadService {
             storage_usage_service: None,
             content_cache: None,
             file_lifecycle_hook: None,
+            upload_temp_dir: None,
         }
     }
 
@@ -80,7 +84,14 @@ impl FileUploadService {
             storage_usage_service: None,
             content_cache: None,
             file_lifecycle_hook: None,
+            upload_temp_dir: None,
         }
+    }
+
+    /// Configures the spool directory for the `&[u8]` upload variants.
+    pub fn with_upload_temp_dir(mut self, dir: Option<PathBuf>) -> Self {
+        self.upload_temp_dir = dir;
+        self
     }
 
     /// Configures the content cache for invalidation on file updates.
@@ -105,6 +116,11 @@ impl FileUploadService {
     }
 
     // ── private helpers ──────────────────────────────────────────
+
+    /// Create a spool temp file, honoring the configured upload temp dir.
+    fn new_temp(&self) -> std::io::Result<tempfile::NamedTempFile> {
+        crate::common::temp::new_spool_temp_file(self.upload_temp_dir.as_deref())
+    }
 
     /// Optionally update storage usage after a successful upload.
     fn maybe_update_storage_usage(&self, file: &FileDto) {
@@ -220,7 +236,8 @@ impl FileUploadUseCase for FileUploadService {
         };
 
         // Spool to temp file + hash
-        let temp = tempfile::NamedTempFile::new()
+        let temp = self
+            .new_temp()
             .map_err(|e| DomainError::internal_error("FileUpload", format!("temp file: {e}")))?;
         tokio::fs::write(temp.path(), content)
             .await
@@ -260,7 +277,8 @@ impl FileUploadUseCase for FileUploadService {
         modified_at: Option<i64>,
     ) -> Result<FileDto, DomainError> {
         // Spool to temp file + hash
-        let temp = tempfile::NamedTempFile::new()
+        let temp = self
+            .new_temp()
             .map_err(|e| DomainError::internal_error("FileUpload", format!("temp file: {e}")))?;
         tokio::fs::write(temp.path(), content)
             .await

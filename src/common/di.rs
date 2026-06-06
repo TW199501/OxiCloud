@@ -425,7 +425,8 @@ impl AppServiceFactory {
                 repos.file_read_repository.clone(),
             )
             .with_content_cache(core.file_content_cache.clone())
-            .with_file_lifecycle_hook(core.file_lifecycle.clone()),
+            .with_file_lifecycle_hook(core.file_lifecycle.clone())
+            .with_upload_temp_dir(self.config.storage.upload_temp_dir.clone()),
         );
 
         let file_retrieval_service = Arc::new(FileRetrievalService::new_with_cache(

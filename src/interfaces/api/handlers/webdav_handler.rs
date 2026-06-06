@@ -822,9 +822,7 @@ async fn handle_put(
     req: Request<Body>,
     path: String,
 ) -> Result<Response<Body>, AppError> {
-    use http_body_util::BodyStream;
-    use tokio::io::AsyncWriteExt;
-    use tokio_stream::StreamExt;
+    use crate::interfaces::upload_spool::spool_body_to_temp;
 
     let user = extract_user(&req)?;
 
@@ -882,44 +880,18 @@ async fn handle_put(
         .to_string();
 
     // ── Streaming spool: body → temp file + incremental hash ──
-    let temp_file = tempfile::NamedTempFile::new()
-        .map_err(|e| AppError::internal_error(format!("Failed to create temp file: {}", e)))?;
-    let temp_path = temp_file.path().to_path_buf();
-
-    let mut file = tokio::fs::File::create(&temp_path)
-        .await
-        .map_err(|e| AppError::internal_error(format!("Failed to open temp file: {}", e)))?;
-
-    let mut hasher = blake3::Hasher::new();
-    let mut total_bytes: usize = 0;
-    let mut stream = BodyStream::new(req.into_body());
-
-    while let Some(frame_result) = stream.next().await {
-        let frame = frame_result
-            .map_err(|e| AppError::bad_request(format!("Failed to read request body: {}", e)))?;
-        if let Some(chunk) = frame.data_ref() {
-            total_bytes += chunk.len();
-            if total_bytes > max_upload {
-                // Abort early — stop reading, delete temp file
-                drop(file);
-                let _ = tokio::fs::remove_file(&temp_path).await;
-                return Err(AppError::payload_too_large(format!(
-                    "Upload exceeds maximum size of {} bytes",
-                    max_upload
-                )));
-            }
-            hasher.update(chunk);
-            file.write_all(chunk).await.map_err(|e| {
-                AppError::internal_error(format!("Failed to write to temp file: {}", e))
-            })?;
-        }
-    }
-    file.flush()
-        .await
-        .map_err(|e| AppError::internal_error(format!("Failed to flush temp file: {}", e)))?;
-    drop(file);
-
-    let hash = hasher.finalize().to_hex().to_string();
+    // Shared with the NextCloud-compat PUT handler; peak heap ~one frame
+    // regardless of file size.  Honors `upload_temp_dir` to keep the spool
+    // off tmpfs/RAM.
+    let spooled = spool_body_to_temp(
+        req.into_body(),
+        max_upload,
+        state.core.config.storage.upload_temp_dir.clone(),
+    )
+    .await?;
+    let temp_path = spooled.temp.path().to_path_buf();
+    let total_bytes = spooled.size as usize;
+    let hash = spooled.hash;
 
     // ── Quota enforcement ────────────────────────────────────
     if let Some(storage_svc) = state.storage_usage_service.as_ref()

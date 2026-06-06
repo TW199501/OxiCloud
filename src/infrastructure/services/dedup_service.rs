@@ -42,7 +42,6 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::fs;
-use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 use crate::application::ports::blob_lifecycle::BlobLifecycleHook;
 use crate::application::ports::blob_storage_ports::BlobStorageBackend;
@@ -499,73 +498,100 @@ impl DedupService {
                 .into_iter()
                 .collect();
 
-        // ── Phase 1: Read only NEW chunks from disk ──────────────
-        let mut file = tokio::fs::File::open(source_path).await.map_err(|e| {
+        // ── Phase 1+2 (fused): upload NEW chunks just-in-time ────
+        // Read each new chunk by positioned I/O immediately before its
+        // upload, instead of first materializing every new chunk's *data* in
+        // a Vec.  Peak heap for file content is bounded to
+        // ~CHUNK_UPLOAD_CONCURRENCY × CDC_MAX_CHUNK (≈ 8 MiB) — proportional
+        // to the chunk size, never the file size, so storing a large
+        // brand-new file no longer spikes RAM.  Existing chunks skip all disk
+        // I/O and just bump ref_count.
+        //
+        // We first collect *owned* per-chunk metadata (hash + offset + length
+        // + existence flag — no file data) so the stream below does not borrow
+        // the `chunks` parameter across an `.await` (which would make this
+        // future non-`Send` and break the upload handlers).
+        let chunk_ops: Vec<(String, u64, usize, bool)> = chunks
+            .iter()
+            .map(|chunk| {
+                let exists = existing_hashes.contains(&chunk.hash);
+                (
+                    chunk.hash.clone(),
+                    chunk.offset as u64,
+                    chunk.length,
+                    exists,
+                )
+            })
+            .collect();
+
+        let source = Arc::new(std::fs::File::open(source_path).map_err(|e| {
             DomainError::internal_error("Dedup", format!("Failed to open source file: {}", e))
-        })?;
+        })?);
 
-        // (hash, Option<data>, size) — None = existing chunk (skip I/O),
-        // Some = new chunk (needs upload).
-        let mut chunk_ops: Vec<(String, Option<Bytes>, u64)> = Vec::with_capacity(chunks.len());
-
-        for chunk in chunks {
-            let size = chunk.length as u64;
-            if existing_hashes.contains(&chunk.hash) {
-                chunk_ops.push((chunk.hash.clone(), None, size));
-            } else {
-                file.seek(std::io::SeekFrom::Start(chunk.offset as u64))
-                    .await
-                    .map_err(|e| {
-                        DomainError::internal_error("Dedup", format!("Failed to seek: {}", e))
-                    })?;
-                let mut buf = vec![0u8; chunk.length];
-                file.read_exact(&mut buf).await.map_err(|e| {
-                    DomainError::internal_error("Dedup", format!("Failed to read chunk: {}", e))
-                })?;
-                chunk_ops.push((chunk.hash.clone(), Some(Bytes::from(buf)), size));
-            }
-        }
-
-        // ── Phase 2: Parallel upload (new) / ref-bump (existing) ─
         let results: Vec<Result<(), DomainError>> = stream::iter(chunk_ops)
-            .map(|(hash, data, size)| async move {
-                if let Some(bytes) = data {
-                    // New chunk: upload to blob backend + INSERT/upsert
-                    backend.put_blob_from_bytes(&hash, bytes).await?;
-                    sqlx::query(
-                        "INSERT INTO storage.blobs (hash, size, ref_count)
-                         VALUES ($1, $2, 1)
-                         ON CONFLICT (hash) DO UPDATE
-                           SET ref_count = storage.blobs.ref_count + 1",
-                    )
-                    .bind(&hash)
-                    .bind(size as i64)
-                    .execute(pool.as_ref())
-                    .await
-                    .map_err(|e| {
-                        DomainError::internal_error(
-                            "Dedup",
-                            format!("Failed to upsert chunk: {}", e),
+            .map(|(hash, offset, length, exists)| {
+                let source = source.clone();
+                let pool = pool.clone();
+                let backend = backend.clone();
+                async move {
+                    if exists {
+                        // Existing chunk: bump ref_count, no disk I/O.
+                        sqlx::query(
+                            "UPDATE storage.blobs
+                                SET ref_count = ref_count + 1
+                              WHERE hash = $1",
                         )
-                    })?;
-                } else {
-                    // Existing chunk: just bump ref_count (no I/O)
-                    sqlx::query(
-                        "UPDATE storage.blobs
-                            SET ref_count = ref_count + 1
-                          WHERE hash = $1",
-                    )
-                    .bind(&hash)
-                    .execute(pool.as_ref())
-                    .await
-                    .map_err(|e| {
-                        DomainError::internal_error(
-                            "Dedup",
-                            format!("Failed to bump ref_count: {}", e),
+                        .bind(&hash)
+                        .execute(pool.as_ref())
+                        .await
+                        .map_err(|e| {
+                            DomainError::internal_error(
+                                "Dedup",
+                                format!("Failed to bump ref_count: {}", e),
+                            )
+                        })?;
+                    } else {
+                        // New chunk: positioned read of just this chunk
+                        // (≤ CDC_MAX_CHUNK) off the async runtime, then upload.
+                        let bytes = tokio::task::spawn_blocking(move || {
+                            use std::os::unix::fs::FileExt;
+                            let mut buf = vec![0u8; length];
+                            source.read_exact_at(&mut buf, offset)?;
+                            Ok::<Vec<u8>, std::io::Error>(buf)
+                        })
+                        .await
+                        .map_err(|e| {
+                            DomainError::internal_error("Dedup", format!("Read task failed: {}", e))
+                        })?
+                        .map_err(|e| {
+                            DomainError::internal_error(
+                                "Dedup",
+                                format!("Failed to read chunk: {}", e),
+                            )
+                        })?;
+
+                        backend
+                            .put_blob_from_bytes(&hash, Bytes::from(bytes))
+                            .await?;
+                        sqlx::query(
+                            "INSERT INTO storage.blobs (hash, size, ref_count)
+                             VALUES ($1, $2, 1)
+                             ON CONFLICT (hash) DO UPDATE
+                               SET ref_count = storage.blobs.ref_count + 1",
                         )
-                    })?;
+                        .bind(&hash)
+                        .bind(length as i64)
+                        .execute(pool.as_ref())
+                        .await
+                        .map_err(|e| {
+                            DomainError::internal_error(
+                                "Dedup",
+                                format!("Failed to upsert chunk: {}", e),
+                            )
+                        })?;
+                    }
+                    Ok(())
                 }
-                Ok(())
             })
             .buffer_unordered(Self::CHUNK_UPLOAD_CONCURRENCY)
             .collect()
