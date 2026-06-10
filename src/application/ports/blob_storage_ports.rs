@@ -60,6 +60,36 @@ pub trait BlobStorageBackend: Send + Sync + 'static {
     /// without overwriting.  Returns the number of bytes stored.
     fn put_blob_from_bytes(&self, hash: &str, data: Bytes) -> BoxFut<'_, Result<u64, DomainError>>;
 
+    /// Store a blob from in-memory bytes **without a durability barrier**.
+    ///
+    /// The CDC chunk path writes thousands of small chunks per file; paying
+    /// two fsyncs per chunk (file + parent dir) put ~8 000 fsyncs on the
+    /// critical path of a 1 GB upload. Callers using this MUST issue one
+    /// [`Self::sync_blobs`] barrier over the written hashes before
+    /// persisting any record that references them (the chunk manifest).
+    ///
+    /// Default: delegates to [`Self::put_blob_from_bytes`] — correct for
+    /// remote backends (S3, Azure) where a successful PUT is already
+    /// durable and the "unsynced" notion does not exist.
+    fn put_blob_from_bytes_unsynced(
+        &self,
+        hash: &str,
+        data: Bytes,
+    ) -> BoxFut<'_, Result<u64, DomainError>> {
+        self.put_blob_from_bytes(hash, data)
+    }
+
+    /// Durability barrier for blobs previously written with
+    /// [`Self::put_blob_from_bytes_unsynced`]: when this resolves, the
+    /// listed blobs and their directory entries survive a power loss.
+    ///
+    /// Default: no-op — matches the default `put_blob_from_bytes_unsynced`,
+    /// which is already durable on completion.
+    fn sync_blobs(&self, hashes: &[String]) -> BoxFut<'_, Result<(), DomainError>> {
+        let _ = hashes;
+        Box::pin(async { Ok(()) })
+    }
+
     /// Stream the full blob content in chunks.
     fn get_blob_stream(&self, hash: &str) -> BoxFut<'_, Result<BlobStream, DomainError>>;
 

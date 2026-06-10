@@ -129,6 +129,41 @@ impl BlobStorageBackend for EncryptedBlobBackend {
         })
     }
 
+    fn put_blob_from_bytes_unsynced(
+        &self,
+        hash: &str,
+        data: Bytes,
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<u64, DomainError>> + Send + '_>> {
+        let inner = self.inner.clone();
+        let hash = hash.to_string();
+        let cipher = self.cipher.clone();
+        Box::pin(async move {
+            // Encrypt in memory: nonce || ciphertext (includes GCM tag)
+            let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+            let ciphertext = cipher.encrypt(&nonce, data.as_ref()).map_err(|e| {
+                DomainError::internal_error("Encryption", format!("encrypt failed: {e}"))
+            })?;
+
+            let mut encrypted = Vec::with_capacity(NONCE_SIZE + ciphertext.len());
+            encrypted.extend_from_slice(nonce.as_slice());
+            encrypted.extend_from_slice(&ciphertext);
+
+            // Delegate the relaxed-durability variant so encryption over
+            // the local backend keeps the batched `sync_blobs` barrier.
+            inner
+                .put_blob_from_bytes_unsynced(&hash, Bytes::from(encrypted))
+                .await
+        })
+    }
+
+    fn sync_blobs(
+        &self,
+        hashes: &[String],
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<(), DomainError>> + Send + '_>> {
+        // Pure passthrough — encryption does not change blob addressing.
+        self.inner.sync_blobs(hashes)
+    }
+
     fn get_blob_stream(
         &self,
         hash: &str,

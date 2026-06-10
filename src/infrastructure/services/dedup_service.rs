@@ -535,15 +535,24 @@ impl DedupService {
             .filter(|c| !existing_hashes.contains(&c.hash))
             .map(|c| (c.hash.clone(), c.offset as u64, c.length))
             .collect();
+        let new_hashes: Vec<String> = new_ops.iter().map(|(h, _, _)| h.clone()).collect();
+        let new_sizes: Vec<i64> = new_ops.iter().map(|(_, _, l)| *l as i64).collect();
 
         let source = Arc::new(std::fs::File::open(source_path).map_err(|e| {
             DomainError::internal_error("Dedup", format!("Failed to open source file: {}", e))
         })?);
 
+        // Chunks are written WITHOUT a per-chunk durability barrier — the
+        // former two fsyncs per chunk put ~8 000 fsyncs on the critical path
+        // of a 1 GB upload. One `sync_blobs` barrier below makes every chunk
+        // durable before the manifest (the only record referencing them) is
+        // committed, so the durability contract observed by the caller is
+        // unchanged. A crash before the barrier leaves orphan chunk files
+        // with no DB row — the same orphan class the per-chunk scheme had,
+        // just a wider window.
         let results: Vec<Result<(), DomainError>> = stream::iter(new_ops)
             .map(|(hash, offset, length)| {
                 let source = source.clone();
-                let pool = pool.clone();
                 let backend = backend.clone();
                 async move {
                     // Positioned read of just this chunk (≤ CDC_MAX_CHUNK) off
@@ -563,27 +572,8 @@ impl DedupService {
                     })?;
 
                     backend
-                        .put_blob_from_bytes(&hash, Bytes::from(bytes))
+                        .put_blob_from_bytes_unsynced(&hash, Bytes::from(bytes))
                         .await?;
-                    // ON CONFLICT covers a concurrent uploader inserting the
-                    // same brand-new chunk between the existence check above and
-                    // this INSERT.
-                    sqlx::query(
-                        "INSERT INTO storage.blobs (hash, size, ref_count)
-                         VALUES ($1, $2, 1)
-                         ON CONFLICT (hash) DO UPDATE
-                           SET ref_count = storage.blobs.ref_count + 1",
-                    )
-                    .bind(&hash)
-                    .bind(length as i64)
-                    .execute(pool.as_ref())
-                    .await
-                    .map_err(|e| {
-                        DomainError::internal_error(
-                            "Dedup",
-                            format!("Failed to upsert chunk: {}", e),
-                        )
-                    })?;
                     Ok(())
                 }
             })
@@ -593,6 +583,31 @@ impl DedupService {
 
         for result in results {
             result?;
+        }
+
+        if !new_hashes.is_empty() {
+            // Durability barrier: every new chunk (and its dirent) is on
+            // stable storage before any DB row references it.
+            backend.sync_blobs(&new_hashes).await?;
+
+            // One batched upsert for all new chunks (was one round-trip per
+            // chunk, interleaved with the uploads). ON CONFLICT covers a
+            // concurrent uploader inserting the same brand-new chunk between
+            // the existence check above and this INSERT.
+            sqlx::query(
+                "INSERT INTO storage.blobs (hash, size, ref_count)
+                 SELECT t.hash, t.size, 1
+                 FROM unnest($1::text[], $2::bigint[]) AS t(hash, size)
+                 ON CONFLICT (hash) DO UPDATE
+                   SET ref_count = storage.blobs.ref_count + 1",
+            )
+            .bind(&new_hashes)
+            .bind(&new_sizes)
+            .execute(pool.as_ref())
+            .await
+            .map_err(|e| {
+                DomainError::internal_error("Dedup", format!("Failed to upsert chunks: {}", e))
+            })?;
         }
 
         // chunk_hashes/chunk_sizes keep the full per-occurrence CDC sequence —
