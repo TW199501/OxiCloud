@@ -1,14 +1,19 @@
 use std::sync::Arc;
+use uuid::Uuid;
 
 use crate::application::dtos::file_dto::FileDto;
+use crate::application::ports::authorization_ports::AuthorizationEngine;
 use crate::application::ports::file_lifecycle::FileLifecycleHook;
 use crate::application::ports::file_ports::{FileUploadUseCase, StoredBlob};
-use crate::application::ports::storage_ports::{FileReadPort, FileWritePort};
+use crate::application::ports::storage_ports::{FileReadPort, FileWritePort, StorageUsagePort};
 use crate::application::services::storage_usage_service::StorageUsageService;
 use crate::common::errors::DomainError;
+use crate::domain::services::authorization::{Permission, Resource, Subject};
 use crate::infrastructure::repositories::pg::FileBlobReadRepository;
 use crate::infrastructure::repositories::pg::FileBlobWriteRepository;
+use crate::infrastructure::services::dedup_service::DedupService;
 use crate::infrastructure::services::file_content_cache::FileContentCache;
+use crate::infrastructure::services::pg_acl_engine::PgAclEngine;
 use tracing::{debug, info, warn};
 
 /// Helper function to extract username from folder path string.
@@ -49,6 +54,18 @@ pub struct FileUploadService {
     content_cache: Option<Arc<FileContentCache>>,
     /// Single lifecycle dispatcher — fires on_file_created / on_file_updated.
     file_lifecycle_hook: Option<Arc<dyn FileLifecycleHook>>,
+    /// Dependencies of the instant-upload path
+    /// (`create_file_from_owned_blob_with_perms`); `None` in minimal test
+    /// wiring.
+    instant_upload: Option<InstantUploadDeps>,
+}
+
+/// Everything the instant-upload path needs beyond the upload service's own
+/// ports: permission checks, the dedup index, and quota enforcement.
+struct InstantUploadDeps {
+    authz: Arc<PgAclEngine>,
+    dedup: Arc<DedupService>,
+    quota: Arc<StorageUsageService>,
 }
 
 impl FileUploadService {
@@ -60,6 +77,7 @@ impl FileUploadService {
             storage_usage_service: None,
             content_cache: None,
             file_lifecycle_hook: None,
+            instant_upload: None,
         }
     }
 
@@ -74,7 +92,24 @@ impl FileUploadService {
             storage_usage_service: None,
             content_cache: None,
             file_lifecycle_hook: None,
+            instant_upload: None,
         }
+    }
+
+    /// Wires the authorization engine, dedup index and quota service that
+    /// power the instant-upload path.
+    pub fn with_instant_upload(
+        mut self,
+        authz: Arc<PgAclEngine>,
+        dedup: Arc<DedupService>,
+        quota: Arc<StorageUsageService>,
+    ) -> Self {
+        self.instant_upload = Some(InstantUploadDeps {
+            authz,
+            dedup,
+            quota,
+        });
+        self
     }
 
     /// Configures the content cache for invalidation on file updates.
@@ -96,6 +131,111 @@ impl FileUploadService {
     ) -> Self {
         self.storage_usage_service = Some(storage_usage_service);
         self
+    }
+
+    // ── Instant upload (zero content bytes) ──────────────────────
+
+    /// Register a new file row pointing at a blob the caller **already
+    /// owns** — the instant-upload path: the client proved it has the
+    /// content by hash, so no bytes travel and no chunk is written. Pure
+    /// metadata: one ref_count bump + one row INSERT.
+    ///
+    /// Security model (mirrors `GET /api/dedup/check/{hash}`):
+    /// - The caller must have `Create` permission on the target folder.
+    /// - The hash is only claimable when the caller owns at least one
+    ///   non-trashed file referencing it — never a global content oracle.
+    ///   A non-owned hash returns `NotFound` (anti-enumeration: same shape
+    ///   as "no such blob") and emits an `instant_upload.rejected` audit
+    ///   event with the real reason.
+    /// - Quota is enforced on the logical size, exactly like a byte upload.
+    pub async fn create_file_from_owned_blob_with_perms(
+        &self,
+        caller_id: Uuid,
+        name: String,
+        folder_id: String,
+        hash: &str,
+    ) -> Result<FileDto, DomainError> {
+        let Some(InstantUploadDeps {
+            authz,
+            dedup,
+            quota,
+        }) = &self.instant_upload
+        else {
+            return Err(DomainError::internal_error(
+                "FileUpload",
+                "instant upload is not wired (authz/dedup/quota missing)",
+            ));
+        };
+
+        // ── AuthZ: Create on the target folder ───────────────────
+        let folder_uuid = Uuid::parse_str(&folder_id)
+            .map_err(|_| DomainError::not_found("Folder", folder_id.clone()))?;
+        authz
+            .require(
+                Subject::User(caller_id),
+                Permission::Create,
+                Resource::Folder(folder_uuid),
+            )
+            .await?;
+
+        // ── Ownership: only blobs the caller can already read ────
+        if !dedup
+            .user_owns_blob_reference(hash, &caller_id.to_string())
+            .await
+        {
+            tracing::info!(
+                target: "audit",
+                event = "instant_upload.rejected",
+                reason = "hash_not_owned",
+                caller_id = %caller_id,
+                blob_hash = %hash,
+                "👮🏻‍♂️ Instant upload rejected: caller owns no file referencing the claimed hash",
+            );
+            return Err(DomainError::not_found("Blob", hash));
+        }
+
+        let Some(metadata) = dedup.get_blob_metadata(hash).await else {
+            // Lost a race with the last-reference delete — same shape as
+            // "never existed".
+            return Err(DomainError::not_found("Blob", hash));
+        };
+
+        // ── Quota on the logical size, before taking any reference ──
+        quota.check_storage_quota(caller_id, metadata.size).await?;
+
+        // The manifest knows the original content type; fall back to the
+        // new name's extension when the stored one is generic.
+        let claimed = metadata.content_type.as_deref().unwrap_or("");
+        let content_type =
+            match crate::common::mime_detect::refine_content_type(&[], &name, claimed) {
+                ct if ct.is_empty() => "application/octet-stream".to_string(),
+                ct => ct,
+            };
+
+        // Take the reference the row registration will consume (it releases
+        // it again on any failure). A concurrent GC between the ownership
+        // check and this bump surfaces as NotFound — the client falls back
+        // to a normal byte upload.
+        dedup.add_reference(hash).await?;
+
+        let dto = self
+            .upload_file_streaming(
+                name,
+                Some(folder_id),
+                content_type,
+                StoredBlob {
+                    hash: hash.to_string(),
+                    size: metadata.size,
+                    is_new_blob: false,
+                },
+            )
+            .await?;
+
+        info!(
+            "⚡ INSTANT UPLOAD: {} ({} bytes, 0 transferred, ID: {})",
+            dto.name, metadata.size, dto.id
+        );
+        Ok(dto)
     }
 
     // ── private helpers ──────────────────────────────────────────

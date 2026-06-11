@@ -439,6 +439,7 @@ impl AppServiceFactory {
         repos: &RepositoryServices,
         trash_service: Option<Arc<TrashService>>,
         authz: &Arc<PgAclEngine>,
+        storage_usage: &Arc<StorageUsageService>,
     ) -> ApplicationServices {
         // Main services
         let folder_service = Arc::new(FolderService::new(
@@ -452,7 +453,12 @@ impl AppServiceFactory {
                 repos.file_read_repository.clone(),
             )
             .with_content_cache(core.file_content_cache.clone())
-            .with_file_lifecycle_hook(core.file_lifecycle.clone()),
+            .with_file_lifecycle_hook(core.file_lifecycle.clone())
+            .with_instant_upload(
+                authz.clone(),
+                core.dedup_service.clone(),
+                storage_usage.clone(),
+            ),
         );
 
         let file_retrieval_service = Arc::new(FileRetrievalService::new_with_cache(
@@ -733,9 +739,19 @@ impl AppServiceFactory {
             .create_trash_service(&repos, &core, &authorization)
             .await;
 
+        // 3c. Storage usage / quota service (needed by the instant-upload
+        // path inside the application services, and re-exposed on AppState
+        // for the handler-side quota checks of the byte-upload paths).
+        let storage_usage = self.create_storage_usage_service(&repos, &pool, &maintenance_pool);
+
         // 4. Application services (with trash + authz already wired)
-        let mut apps =
-            self.create_application_services(&core, &repos, trash_service.clone(), &authorization);
+        let mut apps = self.create_application_services(
+            &core,
+            &repos,
+            trash_service.clone(),
+            &authorization,
+            &storage_usage,
+        );
 
         // 5. Share service
         let share_service = self.create_share_service(&repos, &pool, &authorization);
@@ -775,8 +791,7 @@ impl AppServiceFactory {
             recent_service = Some(recent.clone());
             apps.recent_service = Some(recent);
 
-            storage_usage_service =
-                Some(self.create_storage_usage_service(&repos, &pool, &maintenance_pool));
+            storage_usage_service = Some(storage_usage.clone());
 
             self.start_tree_etag_flush_job(&maintenance_pool);
 

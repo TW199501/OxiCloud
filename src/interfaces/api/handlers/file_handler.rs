@@ -69,6 +69,57 @@ impl FileHandler {
         }
     }
 
+    /// Instant upload: create a file from a blob the caller already owns.
+    ///
+    /// Zero content bytes travel — the client proved possession of the
+    /// content by hash (it computed BLAKE3 locally and confirmed via
+    /// `GET /api/dedup/check/{hash}`), so the server only bumps the blob's
+    /// reference count and registers the metadata row.
+    ///
+    /// All authorization (folder Create permission, hash ownership with
+    /// anti-enumeration, quota) lives in the application service.
+    pub(super) async fn create_file_by_hash_impl(
+        State(state): State<GlobalState>,
+        auth_user: AuthUser,
+        Json(request): Json<CreateFileByHashRequest>,
+    ) -> impl IntoResponse {
+        // Hash shape check — same contract as /api/dedup/check/{hash}.
+        if request.hash.len() != 64 || !request.hash.chars().all(|c| c.is_ascii_hexdigit()) {
+            return AppError::bad_request(
+                "Invalid hash format. Expected BLAKE3 (64 hex characters)",
+            )
+            .into_response();
+        }
+        // Basename only — same path-traversal guard as the multipart upload.
+        let filename = request
+            .name
+            .rsplit('/')
+            .next()
+            .unwrap_or(&request.name)
+            .rsplit('\\')
+            .next()
+            .unwrap_or(&request.name)
+            .to_string();
+        if filename.is_empty() {
+            return AppError::bad_request("File name must not be empty").into_response();
+        }
+
+        match state
+            .applications
+            .file_upload_service
+            .create_file_from_owned_blob_with_perms(
+                auth_user.id,
+                filename,
+                request.folder_id,
+                &request.hash,
+            )
+            .await
+        {
+            Ok(file) => Self::created_json_response(&file).into_response(),
+            Err(err) => Self::domain_error_response(err).into_response(),
+        }
+    }
+
     /// Core upload logic shared by [`Self::upload_file`] and
     /// [`Self::upload_file_with_thumbnails`].
     ///
@@ -1037,6 +1088,39 @@ pub async fn upload_file_with_thumbnails(
     multipart: Multipart,
 ) -> impl IntoResponse {
     FileHandler::upload_file_with_thumbnails_impl(state, auth_user, multipart).await
+}
+
+/// Request body for the instant-upload endpoint.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct CreateFileByHashRequest {
+    /// File name to create (path components are stripped).
+    pub name: String,
+    /// Target folder ID (the caller needs Create permission on it).
+    pub folder_id: String,
+    /// BLAKE3 hash (64 hex chars) of content the caller already owns.
+    pub hash: String,
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/files/by-hash",
+    request_body = CreateFileByHashRequest,
+    responses(
+        (status = 201, description = "File created from an already-owned blob — zero bytes transferred", body = FileDto),
+        (status = 400, description = "Invalid hash format or empty name"),
+        (status = 404, description = "No owned blob with this hash (anti-enumeration: same shape as unknown hash)"),
+        (status = 409, description = "A file with this name already exists in the folder"),
+        (status = 507, description = "Storage quota exceeded"),
+    ),
+    security(("bearerAuth" = [])),
+    tag = "files"
+)]
+pub async fn create_file_by_hash(
+    state: State<GlobalState>,
+    auth_user: AuthUser,
+    request: Json<CreateFileByHashRequest>,
+) -> impl IntoResponse {
+    FileHandler::create_file_by_hash_impl(state, auth_user, request).await
 }
 
 #[utoipa::path(

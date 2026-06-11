@@ -518,3 +518,26 @@
  * @typedef {{kind: 'user', id: string} | {kind: 'group', id: string}} GroupMemberItem
  */
 
+// ------------------- Instant upload (dedup)
+
+/**
+ * Response from `GET /api/dedup/check/{hash}` — user-scoped: `exists` only
+ * reflects content the CALLER already owns, never global existence.
+ * Mirrors `HashCheckResponse` on the server (`dedup_handler.rs`).
+ * @typedef {Object} HashCheckAnswer
+ * @property {boolean} exists
+ * @property {string} hash BLAKE3 echoed back (64 hex chars)
+ * @property {number} [existing_size] size in bytes, present when `exists`
+ */
+
+/**
+ * Request body for `POST /api/files/by-hash` (instant upload — registers a
+ * file from an already-owned blob, zero content bytes on the wire).
+ * Mirrors `CreateFileByHashRequest` on the server (`file_handler.rs`).
+ * The 201 response body is a {@link FileItem}.
+ * @typedef {Object} CreateFileByHash
+ * @property {string} name file name to create (basename only)
+ * @property {string} folder_id target folder (caller needs Create on it)
+ * @property {string} hash BLAKE3 of the owned content (64 hex chars)
+ */
+
